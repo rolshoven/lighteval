@@ -77,6 +77,8 @@ dependencies = [
     "nltk==3.9.1",
     "scikit-learn",
     "sacrebleu",
+    "unbabel-comet",
+    "gemba",
     "rouge_score==0.1.2",
     "sentencepiece>=0.1.99",
     "protobuf",
