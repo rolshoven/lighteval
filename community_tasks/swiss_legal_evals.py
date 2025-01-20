@@ -35,6 +35,7 @@ import logging
 import os
 import statistics
 from dataclasses import dataclass
+from typing import Callable, Literal, Optional
 
 import nltk
 import requests
@@ -61,7 +62,6 @@ from lighteval.metrics.utils.metric_utils import (
 from lighteval.tasks.extended.mix_eval.main import process_judge_response_freeform_gpt
 from lighteval.tasks.lighteval_task import LightevalTaskConfig
 from lighteval.tasks.requests import Doc
-
 
 logger = logging.getLogger(__name__)
 
@@ -779,9 +779,11 @@ def create_translation_pairs(langs_list: list) -> list[tuple]:
 class LevelConfig:
     name: str
     text_col_name: str
-    metadata_cols: list[str]
     generation_size: int
     stop_sequence: list[str]  # just "\n" leads to problems for anthropic models, maybe we need a special case there
+    metadata_cols: Optional[list[str]] = None
+    custom_attributes: Optional[dict] = None
+    dataset_filter: Optional[Callable[[dict], bool]] = None
 
 
 @dataclass
@@ -789,6 +791,7 @@ class DatasetConfig:
     name: str
     hf_repo: str
     languages: list[str]
+    task_type: Literal["translation", "summarization"]
     subsets: dict[str, LevelConfig]
 
     def __post_init__(self):
@@ -800,6 +803,7 @@ SwissDecisionSummaryTranslations = DatasetConfig(
     name="sdst",
     hf_repo="joelniklaus/SwissDecisionSummaryTranslations",
     languages=["de", "fr", "it"],
+    task_type="translation",
     subsets={
         "bge_level": LevelConfig(
             name="bge_level",
@@ -830,6 +834,7 @@ SwissLawTranslations = DatasetConfig(
     name="slt",
     hf_repo="joelniklaus/SwissLawTranslations",
     languages=["de", "fr", "it", "rm", "en"],
+    task_type="translation",
     subsets={
         "law_level": LevelConfig(
             name="law_level",
@@ -860,6 +865,7 @@ SwissSupremeCourtPressReleaseTranslations = DatasetConfig(
     name="sscprt",
     hf_repo="joelniklaus/SwissSupremeCourtPressReleaseTranslations",
     languages=["de", "fr", "it"],
+    task_type="translation",
     subsets={
         "press_release": LevelConfig(
             name="press_release",
@@ -871,8 +877,43 @@ SwissSupremeCourtPressReleaseTranslations = DatasetConfig(
     },
 )
 
+# Headnote generation (summarization) for Swiss Leading Decisions on one level: the entire leading decision.
+slds_languages = ["de", "fr", "it"]
 
-def create_prompt_fn(level_config: LevelConfig, source_lang: str, target_lang: str):
+
+def get_slds_filter_fn(decision_language: str, headnote_language: str):
+    def filter_dataset(dataset):
+        return dataset["decision_language"] == decision_language and dataset["headnote_language"] == headnote_language
+
+    return filter_dataset
+
+
+SwissLeadingDecisionHeadnotes = DatasetConfig(
+    name="slds",
+    hf_repo="rcds/slds",
+    languages=slds_languages,
+    task_type="summarization",
+    subsets={
+        **{
+            f"{decision_lang}_{headnote_lang}": LevelConfig(
+                name=f"{decision_lang}_{headnote_lang}",
+                custom_attributes={
+                    "decision_language": decision_lang,
+                    "headnote_language": headnote_lang,
+                },
+                text_col_name="decision",
+                generation_size=512,
+                dataset_filter=get_slds_filter_fn(decision_lang, headnote_lang),
+                stop_sequence=["</s>"],
+            )
+            for decision_lang in slds_languages
+            for headnote_lang in slds_languages
+        }
+    },
+)
+
+
+def create_translation_prompt_fn(level_config: LevelConfig, source_lang: str, target_lang: str):
     """
     Create a prompt function for a given level configuration.
     """
@@ -913,6 +954,9 @@ JUDGE_MODELS = {
 
 LEXICAL_METRICS = [
     "bleu",
+    "rouge1",
+    "rouge2",
+    "rougeL",
     "chrf",
     "bleu_sentence",
     "chrf_sentence",
@@ -935,7 +979,7 @@ JUDGE_METRICS = [
     for few_shot_style in ["diverse", "single"]
 ]
 
-metrics_to_evaluate = ["judge"]
+metrics_to_evaluate = ["debug"]
 
 METRICS_TO_USE = []
 if metrics_to_evaluate == ["debug"]:
@@ -950,6 +994,9 @@ elif "judge" in metrics_to_evaluate:
     METRICS_TO_USE += JUDGE_METRICS
 else:
     METRICS_TO_USE = LEXICAL_METRICS + GPU_METRICS + API_METRICS
+
+METRICS_TO_USE = ["bleu", "rouge1", "rouge2", "rougeL", "meteor", "bert_score"]
+
 logger.info(f"Available metrics: {METRICS_TO_USE}")
 
 METRICS = {}
@@ -959,6 +1006,12 @@ def init_lexical_metric(metric_name: str):
     # Corpus level metrics
     if metric_name == "bleu":
         METRICS["bleu"] = Metrics.bleu
+    if metric_name == "rouge1":
+        METRICS["rouge1"] = Metrics.rouge1
+    if metric_name == "rouge2":
+        METRICS["rouge2"] = Metrics.rouge2
+    if metric_name == "rougeL":
+        METRICS["rougeL"] = Metrics.rougeL
     if metric_name == "chrf":
         METRICS["chrf"] = Metrics.chrf
     if metric_name == "ter":
@@ -1104,6 +1157,39 @@ class TranslationTask(LightevalTaskConfig):
         )
 
 
+class HeadnoteGenerationTask(LightevalTaskConfig):
+    def __init__(
+        self,
+        dataset_config: DatasetConfig,
+        level_name: str,
+    ):
+        level_config = dataset_config.subsets[level_name]
+        headnote_language = dataset_config.subsets[level_name].custom_attributes["headnote_language"]
+        super().__init__(
+            name=f"{dataset_config.name}:{level_name}",
+            suite=["community"],
+            prompt_function=slds_prompt_fn,
+            hf_repo="rcds/slds",
+            hf_subset=level_name,
+            hf_filter=level_config.dataset_filter,
+            hf_avail_splits=["train", "validation", "test"],
+            evaluation_splits=["test"],
+            few_shots_split="validation",
+            few_shots_select="sequential",
+            generation_size=level_config.generation_size,
+            metric=[
+                get_bert_score(language=headnote_language, model_type="xlm-roberta-large", device=device),
+                Metrics.bleu,
+                get_meteor(),
+                Metrics.rouge1,
+                Metrics.rouge2,
+                Metrics.rougeL,
+            ],
+            stop_sequence=level_config.stop_sequence,
+            trust_dataset=True,
+        )
+
+
 # STORE YOUR EVALS
 
 # list of all the subsets to use for this eval
@@ -1111,18 +1197,29 @@ DATASETS = [
     SwissDecisionSummaryTranslations,
     SwissLawTranslations,
     SwissSupremeCourtPressReleaseTranslations,
+    SwissLeadingDecisionHeadnotes,
 ]
 
 TASKS_TABLE = [
-    TranslationTask(
-        dataset_config=dataset,
-        level_name=subset,
-        source_lang=source_lang,
-        target_lang=target_lang,
-    )
-    for dataset in DATASETS
-    for subset in dataset.subsets
-    for source_lang, target_lang in dataset.translation_pairs
+    *[
+        TranslationTask(
+            dataset_config=dataset,
+            level_name=subset,
+            source_lang=source_lang,
+            target_lang=target_lang,
+        )
+        for dataset in DATASETS
+        for subset in dataset.subsets
+        for source_lang, target_lang in dataset.translation_pairs
+        if dataset.task_type == "translation"
+    ],
+    *[
+        HeadnoteGenerationTask(
+            dataset_config=SwissLeadingDecisionHeadnotes,
+            level_name=subset,
+        )
+        for subset in SwissLeadingDecisionHeadnotes.subsets
+    ],
 ]
 
 
@@ -1130,5 +1227,5 @@ TASKS_TABLE = [
 # You should not need to touch this
 # Convert to dict for lighteval
 if __name__ == "__main__":
-    print(t.name for t in TASKS_TABLE)
+    print([t.name for t in TASKS_TABLE])
     print(len(TASKS_TABLE))
