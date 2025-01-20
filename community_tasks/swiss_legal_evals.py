@@ -942,6 +942,43 @@ def create_translation_prompt_fn(level_config: LevelConfig, source_lang: str, ta
     return prompt_fn
 
 
+def iso2lang(iso_code: str) -> str:
+    """
+    Convert an ISO 639-1 code to a language name.
+    """
+    assert iso_code in ["de", "fr", "it"], f"Invalid ISO code for SLDS dataset: {iso_code}"
+    if iso_code == "de":
+        return "German"
+    if iso_code == "fr":
+        return "French"
+    if iso_code == "it":
+        return "Italian"
+    return None
+
+
+def slds_prompt_fn(line: dict, task_name: str = None):
+    """
+    Create a prompt for the Swiss Legal Decision Summaries dataset.
+    """
+    template = "Generate a headnote in {language} for the following leading decision: {decision}"
+
+    return Doc(
+        task_name=task_name,
+        query=template.format(language=iso2lang(line["headnote_language"]), decision=line["decision"]),
+        choices=[str(line["headnote"])],
+        gold_index=0,
+        specific={
+            "sample_id": line["sample_id"],
+            "decision_id": line["decision_id"],
+            "decision_language": line["decision_language"],
+            "headnote_language": line["headnote_language"],
+            "law_area": line["law_area"],
+            "year": line["year"],
+            "text": line["decision"],  # Needs to be called like this for extractiveness metric
+        },
+    )
+
+
 JUDGE_MODELS = {
     "gpt-4o-mini": "openai/gpt-4o-mini-2024-07-18",
     "gpt-4o": "openai/gpt-4o-2024-11-20",
@@ -1139,7 +1176,7 @@ class TranslationTask(LightevalTaskConfig):
         super().__init__(
             name=f"{dataset_config.name}-{level_name}:{source_lang}-{target_lang}",
             suite=["community"],
-            prompt_function=create_prompt_fn(level_config, source_lang, target_lang),
+            prompt_function=create_translation_prompt_fn(level_config, source_lang, target_lang),
             hf_repo=dataset_config.hf_repo,
             hf_subset=level_name,
             hf_filter=None,
@@ -1184,6 +1221,7 @@ class HeadnoteGenerationTask(LightevalTaskConfig):
                 Metrics.rouge1,
                 Metrics.rouge2,
                 Metrics.rougeL,
+                Metrics.extractiveness,
             ],
             stop_sequence=level_config.stop_sequence,
             trust_dataset=True,
