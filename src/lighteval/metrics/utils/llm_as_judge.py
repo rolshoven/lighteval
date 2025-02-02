@@ -36,7 +36,6 @@ from tqdm.asyncio import tqdm_asyncio
 from lighteval.utils.imports import is_litellm_available, is_openai_available, is_vllm_available
 from lighteval.utils.utils import as_list
 
-
 logging.getLogger("openai").setLevel(logging.ERROR)
 logging.getLogger("httpx").setLevel(logging.ERROR)
 logger = logging.getLogger(__name__)
@@ -52,7 +51,7 @@ class JudgeLM:
         model (str): The name of the model.
         templates (Callable): A function taking into account the question, options, answer, and gold and returning the judge prompt.
         process_judge_response (Callable): A function for processing the judge's response.
-        judge_backend (Literal["openai", "transformers", "tgi", "vllm"]): The backend for the judge.
+        judge_backend (Literal["litellm", "openai", "transformers", "tgi", "vllm"]): The backend for the judge.
         url (str | None): The URL for the OpenAI API.
         api_key (str | None): The API key for the OpenAI API (either OpenAI or HF key).
 
@@ -290,7 +289,7 @@ class JudgeLM:
             error_message = "ERROR: Failed to get response from the API."
             for _ in range(self.API_MAX_RETRY):
                 try:
-                    max_new_tokens = 512
+                    max_new_tokens = 1024
                     if "o1" in self.model or "o3" in self.model or "R1" in self.model:
                         max_new_tokens = min(max_new_tokens * 10, 32000)
 
