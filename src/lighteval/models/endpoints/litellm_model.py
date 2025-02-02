@@ -23,30 +23,32 @@
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from typing import Callable, List, Optional, Union
 
 from tqdm import tqdm
 
 from lighteval.data import GenerativeTaskDataset
 from lighteval.models.abstract_model import LightevalModel, ModelConfig
+from lighteval.models.model_input import GenerationParameters
 from lighteval.models.model_output import ModelResponse
 from lighteval.tasks.prompt_manager import PromptManager
 from lighteval.tasks.requests import Doc
 from lighteval.utils.cache_management import SampleCache, cached
 from lighteval.utils.imports import is_litellm_available
 
-
 logger = logging.getLogger(__name__)
 
 if is_litellm_available():
     import litellm
     from litellm import encode
-    from litellm.caching.caching import Cache
+    from litellm.caching.caching import Cache, LiteLLMCacheType
     from litellm.utils import ModelResponse as LitellmModelResponse
 
     logging.getLogger("LiteLLM").setLevel(logging.WARNING)
     logging.getLogger("LiteLLM").handlers.clear()
 
-    litellm.cache = Cache(type="disk")
+    litellm.cache = Cache(type=LiteLLMCacheType.DISK)
 else:
     from unittest.mock import Mock
 
@@ -108,6 +110,25 @@ class LiteLLMModelConfig(ModelConfig):
     base_url: str | None = None
     api_key: str | None = None
     concurrent_requests: int = 10
+    use_cache: Optional[bool] = True
+    generation_parameters: Optional[GenerationParameters] = None
+    success_callback: Optional[List[Union[str, Callable]]] = None
+    failure_callback: Optional[List[Union[str, Callable]]] = None
+
+    def __post_init__(self):
+        if not self.generation_parameters:
+            self.generation_parameters = GenerationParameters()
+
+    @classmethod
+    def from_path(cls, path: str) -> "LiteLLMModelConfig":
+        import yaml
+
+        with open(path, "r") as f:
+            config = yaml.safe_load(f)["model"]
+        generation_parameters = GenerationParameters.from_dict(config)
+        return cls(
+            model=config["model_name"], use_cache=config["use_cache"], generation_parameters=generation_parameters
+        )
 
 
 class LiteLLMClient(LightevalModel):
@@ -117,6 +138,10 @@ class LiteLLMClient(LightevalModel):
         """IMPORTANT: Your API keys should be set in the environment variables.
         If a base_url is not set, it will default to the public API.
         """
+        self.generation_parameters = config.generation_parameters
+        self.sampling_params = self.generation_parameters.to_litellm_dict()
+        self.use_cache = config.use_cache
+
         self.config = config
         self.model = config.model_name
         self.provider = config.provider or config.model_name.split("/")[0]
@@ -125,20 +150,21 @@ class LiteLLMClient(LightevalModel):
         self.generation_parameters = config.generation_parameters
         self.concurrent_requests = config.concurrent_requests
 
-        self.API_MAX_RETRY = 5
+        self.API_MAX_RETRY = 8
         self.API_RETRY_SLEEP = 3
         self.API_RETRY_MULTIPLIER = 2
-
+        self.CONCURENT_CALLS = 1  # 100 leads to hitting Anthropic rate limits
+        self.model = config.model
         self._tokenizer = encode
         self.pairwise_tokenization = False
         litellm.drop_params = True
-        litellm.set_verbose = False
-        self.prompt_manager = PromptManager(
-            use_chat_template=True, tokenizer=self.tokenizer, system_prompt=config.system_prompt
-        )
+        litellm.verbose = True
 
-        # Initialize cache for tokenization and predictions
-        self._cache = SampleCache(config)
+        if config.success_callback:
+            litellm.success_callback = config.success_callback
+
+        if config.failure_callback:
+            litellm.failure_callback = config.failure_callback
 
     def _prepare_stop_sequence(self, stop_sequence):
         """Prepare and validate stop sequence."""
@@ -173,11 +199,14 @@ class LiteLLMClient(LightevalModel):
                 kwargs = {
                     "model": self.model,
                     "messages": prompt,
+                    "response_format": {"type": "text"},
+                    "max_tokens": max_new_tokens if max_new_tokens else None,
                     "logprobs": return_logits if self.provider == "openai" else None,
                     "base_url": self.base_url,
                     "n": num_samples,
-                    "caching": True,
+                    "caching": self.use_cache,
                     "api_key": self.api_key,
+                    **self.sampling_params,
                 }
 
                 if num_samples > 1 and self.generation_parameters.temperature == 0:
@@ -235,9 +264,7 @@ class LiteLLMClient(LightevalModel):
         stop_sequencess = [stop_sequence for _ in prompts]
         assert (
             len(prompts) == len(return_logitss) == len(max_new_tokenss) == len(num_sampless) == len(stop_sequencess)
-        ), (
-            f"Length of prompts, return_logitss, max_new_tokenss, num_sampless, stop_sequences, system_prompts should be the same but are {len(prompts)}, {len(return_logitss)}, {len(max_new_tokenss)}, {len(num_sampless)}, {len(stop_sequencess)}"
-        )
+        ), f"Length of prompts, return_logitss, max_new_tokenss, num_sampless, stop_sequences, system_prompts should be the same but are {len(prompts)}, {len(return_logitss)}, {len(max_new_tokenss)}, {len(num_sampless)}, {len(stop_sequencess)}"
 
         with ThreadPoolExecutor(self.concurrent_requests) as executor:
             for entry in tqdm(
