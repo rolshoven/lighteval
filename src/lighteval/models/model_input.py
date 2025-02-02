@@ -59,6 +59,19 @@ class GenerationParameters:
         """
         return GenerationParameters(**config_dict.get("generation", {}))
 
+    def to_litellm_dict(self) -> dict:
+        """Selects relevant generation and sampling parameters for the litellm client."""
+        # Currently, only GreedyUntil requests are supported, which already inject `max_tokens` and `stop` in the client call
+        args = {
+            "frequency_penalty": self.frequency_penalty,
+            "presence_penalty": self.presence_penalty,
+            "seed": self.seed,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "top_k": self.top_k,  # not supported by all providers
+        }
+        return {k: v for k, v in args.items() if v is not None}
+
     def to_vllm_openai_dict(self) -> dict:
         """Selects relevant generation and sampling parameters for vllm and openai models.
         Doc: https://docs.vllm.ai/en/v0.5.5/dev/sampling_params.html

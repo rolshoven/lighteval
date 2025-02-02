@@ -25,13 +25,14 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional, Union, List
 
 from tqdm import tqdm
 
 from lighteval.data import GenerativeTaskDataset
 from lighteval.models.abstract_model import LightevalModel
 from lighteval.models.endpoints.endpoint_model import ModelInfo
+from lighteval.models.model_input import GenerationParameters
 from lighteval.models.model_output import (
     GenerativeResponse,
     LoglikelihoodResponse,
@@ -51,28 +52,51 @@ logger = logging.getLogger(__name__)
 if is_litellm_available():
     import litellm
     from litellm import encode
-    from litellm.caching.caching import Cache
+    from litellm.caching.caching import Cache, LiteLLMCacheType
     from litellm.utils import ModelResponse
 
     logging.getLogger("LiteLLM").setLevel(logging.WARNING)
     logging.getLogger("LiteLLM").handlers.clear()
 
-    litellm.cache = Cache(type="disk")
+    litellm.cache = Cache(type=LiteLLMCacheType.DISK)
 
 
 @dataclass
 class LiteLLMModelConfig:
     model: str
+    use_cache: Optional[bool] = True
+    generation_parameters: Optional[GenerationParameters] = None
+    success_callback: Optional[List[Union[str, Callable]]] = None
+    failure_callback: Optional[List[Union[str, Callable]]] = None
+
+    def __post_init__(self):
+        if not self.generation_parameters:
+            self.generation_parameters = GenerationParameters()
+
+    @classmethod
+    def from_path(cls, path: str) -> "LiteLLMModelConfig":
+        import yaml
+
+        with open(path, "r") as f:
+            config = yaml.safe_load(f)["model"]
+        generation_parameters = GenerationParameters.from_dict(config)
+        return cls(
+            model=config["model_name"], use_cache=config["use_cache"], generation_parameters=generation_parameters
+        )
 
 
 class LiteLLMClient(LightevalModel):
     _DEFAULT_MAX_LENGTH: int = 4096
 
-    def __init__(self, config, env_config) -> None:
+    def __init__(self, config: LiteLLMModelConfig, env_config) -> None:
         """
         IMPORTANT: Your API keys should be set in the environment variables.
         If a base_url is not set, it will default to the public API.
         """
+        self.generation_parameters = config.generation_parameters
+        self.sampling_params = self.generation_parameters.to_litellm_dict()
+        self.use_cache = config.use_cache
+
         self.model_info = ModelInfo(
             model_name=config.model,
             model_sha="",
@@ -81,17 +105,21 @@ class LiteLLMClient(LightevalModel):
         )
         self.provider = config.model.split("/")[0]
         self.base_url = os.getenv(f"{self.provider.upper()}_BASE_URL", None)
-        self.API_MAX_RETRY = 5
+        self.API_MAX_RETRY = 8
         self.API_RETRY_SLEEP = 3
         self.API_RETRY_MULTIPLIER = 2
-        self.CONCURENT_CALLS = 20  # 100 leads to hitting Anthropic rate limits
-        self.TEMPERATURE = 0.7
-        self.TOP_P = 0.95
+        self.CONCURENT_CALLS = 1  # 100 leads to hitting Anthropic rate limits
         self.model = config.model
         self._tokenizer = encode
         self.pairwise_tokenization = False
         litellm.drop_params = True
         litellm.verbose = True
+
+        if config.success_callback:
+            litellm.success_callback = config.success_callback
+
+        if config.failure_callback:
+            litellm.failure_callback = config.failure_callback
 
     def _prepare_stop_sequence(self, stop_sequence):
         """Prepare and validate stop sequence."""
@@ -128,14 +156,14 @@ class LiteLLMClient(LightevalModel):
                 kwargs = {
                     "model": self.model,
                     "messages": prompt,
-                    "max_completion_tokens": max_new_tokens,
+                    "response_format": {"type": "text"},
+                    "max_tokens": max_new_tokens if max_new_tokens else None,
                     "logprobs": return_logits if self.provider == "openai" else None,
                     "stop": stop_sequence,
                     "base_url": self.base_url,
                     "n": num_samples,
-                    "temperature": self.TEMPERATURE,
-                    "top_p": self.TOP_P,
-                    "caching": True,
+                    "caching": self.use_cache,
+                    **self.sampling_params,
                 }
 
                 response = litellm.completion(**kwargs)
