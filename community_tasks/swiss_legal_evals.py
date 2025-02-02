@@ -33,11 +33,14 @@ Author: Joel Niklaus
 import importlib.metadata as importlib_metadata
 import logging
 import os
+import re
 import statistics
 from dataclasses import dataclass
+from textwrap import dedent
 from typing import Callable, Literal, Optional
 
 import nltk
+import numpy as np
 import requests
 import torch
 from comet import download_model, load_from_checkpoint
@@ -51,9 +54,12 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from lighteval.metrics.imports.bert_scorer import BERTScorer
 from lighteval.metrics.metrics import Metrics
-from lighteval.metrics.metrics_sample import BertScore, JudgeLLM
+from lighteval.metrics.metrics_corpus import CorpusLevelTranslationMetric
+from lighteval.metrics.metrics_sample import ROUGE, BertScore, Extractiveness, JudgeLLM
 from lighteval.metrics.normalizations import remove_braces, remove_braces_and_strip
+from lighteval.metrics.sample_preparator import GenerativePreparator
 from lighteval.metrics.utils.metric_utils import (
+    CorpusLevelMetric,
     MetricCategory,
     MetricUseCase,
     SampleLevelMetric,
@@ -258,6 +264,187 @@ Your Judgment: The model’s translation diverges significantly from the golden 
 """,
 }
 
+SLDS_JUDGE_SYSTEM_PROMPT = dedent(
+    """
+    You are a senior legal expert and quality assurance specialist with over 20 years of experience in Swiss law. You possess native-level proficiency in German, French, and Italian, enabling you to evaluate Swiss Federal Supreme Court headnotes with precision. Your task is to compare the **Official (Gold) Headnote** with a **Model-Generated Headnote** and provide a structured evaluation in five categories. You will carefully analyze each category and provide a short analysis before committing to a score. The categories are:
+
+    1. Accuracy & Faithfulness: How well does the Model-Generated Headnote match the essential legal meaning and intent of the Official Headnote?
+    2. Completeness & Relevance: Does the Model-Generated Headnote include all important points that the Official Headnote emphasizes, without adding irrelevant details?
+    3. Clarity & Coherence: Is the text well-organized, easy to understand, and coherent in style and structure?
+    4. Articles: Do the same legal articles (prefixed “Art.”) appear correctly and completely in the Model-Generated Headnote as in the Official Headnote?
+    5. Considerations: Do the same considerations (prefixed “E.” in German or “consid.” in French/Italian) appear correctly and completely in the Model-Generated Headnote as in the Official Headnote?
+
+    For each category, provide a short and concise explanation followed by a score on a scale from 1 to 3:
+
+    1: Fails or is substantially flawed.
+    Major omissions or inaccuracies that fundamentally alter the legal meaning.
+
+    2: Largely correct but missing key element(s).
+    Generally captures the substance, yet lacks one or more important details or references.
+
+    3: Closely matches the Official Headnote.
+    Covers all critical aspects and references with only minor wording variations that do not affect the legal content.
+
+    Your output must follow the exact structure provided below to ensure consistency and ease of parsing.
+    """
+)
+
+SLDS_JUDGE_USER_PROMPT = dedent(
+    """
+    Below are two headnotes for the same leading decision from the Swiss Federal Supreme Court. Please compare the Model-Generated Headnote to the Official (Gold) Headnote according to the following five categories: Accuracy & Faithfulness, Completeness & Relevance, Clarity & Coherence, Articles, and Considerations.
+
+    1. Analyze the Model-Generated Headnote in comparison to the Official Headnote for each category.
+    2. Provide a short explanation for your evaluation in each category.
+    3. Conclude each category with a score in the exact format: CATEGORYNAME_SCORE: [X], where X is an integer from 1 to 3.
+
+    Required Output Format:
+
+    ACCURACY_FAITHFULNESS:  
+    Analysis: [Your concise analysis here]  
+    ACCURACY_FAITHFULNESS_SCORE: [X]
+
+    COMPLETENESS_RELEVANCE:  
+    Analysis: [Your concise analysis here]  
+    COMPLETENESS_RELEVANCE_SCORE: [X]
+
+    CLARITY_COHERENCE:  
+    Analysis: [Your concise analysis here]  
+    CLARITY_COHERENCE_SCORE: [X]
+
+    ARTICLES:  
+    Analysis: [Your concise analysis here]  
+    ARTICLES_SCORE: [X]
+
+    CONSIDERATIONS:  
+    Analysis: [Your concise analysis here]  
+    CONSIDERATIONS_SCORE: [X]
+
+    Please adhere strictly to this structure.
+
+    Here is an example how your response could look like:
+
+    <EXAMPLE>
+    {one_shot_example}
+    </EXAMPLE>
+
+    Now evaluate the Model-Generated Headnote against the Official (Gold) Headnote on the headnotes below.
+
+    Official (Gold) Headnote:  
+    {original_headnote}
+
+    Model-Generated Headnote:  
+    {generated_headnote}
+    """
+)
+
+# Sample id: 60312; decision id: 148 IV 89
+SLDS_JUDGE_ONE_SHOT_EXAMPLE_DE = dedent(
+    """
+    Official (Gold) Headnote:
+    Art. 391 Abs. 2 StPO; die erstmalige Anordnung einer ambulanten Massnahme durch das Berufungsgericht verstösst gegen das Verschlechterungsverbot (reformatio in peius). Verzichtet das erstinstanzliche Gericht auf die Anordnung einer beantragten ambulanten Massnahme und hat die Staatsanwaltschaft in ihrer Anschlussberufung deren Anordnung nicht erneut beantragt, verletzt das Berufungsgericht das Verschlechterungsverbot, wenn es eine ambulante Massnahme anordnet (E. 4.1-4.4).
+
+    Model-Generated Headnote:
+    Art. 391 Abs. 2 StPO; Verschlechterungsverbot; ambulante Massnahme nach Art. 63 StGB. Die erstmalige Anordnung einer ambulanten Massnahme im Berufungsverfahren verletzt das Verschlechterungsverbot nach Art. 391 Abs. 2 StPO, wenn erstinstanzlich auf eine solche Massnahme verzichtet wurde und die Staatsanwaltschaft in ihrer Anschlussberufung keinen entsprechenden Antrag gestellt hat. Eine solche Anordnung stellt eine unzulässige reformatio in peius dar, da der Beschuldigte das Risiko einer nachträglichen Anpassung oder Umwandlung der Massnahme nur dann trägt, wenn bereits erstinstanzlich eine therapeutische Massnahme angeordnet wurde (E. 4.4). Die freiwillige Teilnahme an einer Therapie durch den Beschuldigten begründet keine ausreichende Grundlage für die erstmalige Anordnung einer ambulanten Massnahme im Berufungsverfahren (E. 4.3).
+
+    ACCURACY_FAITHFULNESS:
+    Analysis: The model-generated headnotes captures the legal essence and intent of the official headnote accurately. It correctly explains the legal principle of reformatio in peius and the violation of the prohibition of worsening in the context of ordering outpatient measures.
+    ACCURACY_FAITHFULNESS_SCORE: 3
+
+    COMPLETENESS_RELEVANCE:
+    Analysis: The model-generated headnote inclundes all relevant aspects of the official headnote, such as the prohibition of worsening, the legal context of ordering outpatient measures, and the implications of the prosecution's appeal. However, it also adds additional details regarding the voluntary participation in therapy, which are not explicitly mentioned in the official headnote. These are very specific details that may not be necessary for a concise headnote.
+    COMPLETENESS_RELEVANCE_SCORE: 2
+
+    CLARITY_COHERENCE:
+    Analysis: The model-generated headnote is easy to understand and coherent. The clarity could be improved by not repeating the fact that the outpatient measure violates the prohibition of worsening twice. Other than that, the structure and style are clear and well-organized.
+    CLARITY_COHERENCE_SCORE: 2
+
+    ARTICLES:
+    Analysis: While both the official and model-generated headnotes correctly reference Art. 391 Abs. 2 StPO, the model-generated headnote also includes Art. 63 StGB, which is not explicitly mentioned in the official headnote. This additional reference is relevant to the context of outpatient measures but may not be necessary for a concise headnote.
+    ARTICLES_SCORE: 2
+
+    CONSIDERATIONS:
+    Analysis: The model-generated headnote only cites considerations E. 4.3 and E. 4.4, whereas the official headnote includes considerations E. 4.1 to E. 4.4. This omission reduces the completeness of the model-generated headnote.
+    CONSIDERATIONS_SCORE: 2
+    """
+)
+
+# Sample id: 60247; decision id: 148 IV 292
+SLDS_JUDGE_ONE_SHOT_EXAMPLE_FR = dedent(
+    """
+    Official (Gold) Headnote:
+    Travail externe (art. 77a CP). Le condamné à une peine privative de liberté qui a passé une longue période en détention provisoire peut exécuter sa peine (restante) directement sous la forme de travail externe s'il réalise les conditions posées à l'art. 77a al. 1 CP. Il n'a pas nécessairement besoin d'être privé de sa liberté au moment où est prise la décision ordonnant le travail externe (consid. 2.5.2).
+
+    Model-Generated Headnote:
+    Art. 77a CP; art. 164 ss RSPC; conditions pour l'octroi du travail externe. Le travail externe, en tant que phase de l'élargissement progressif de l'exécution de la peine, ne nécessite pas impérativement un séjour préalable en milieu ouvert ou dans une section ouverte d'un établissement fermé. L'utilisation du terme "en principe" à l'art. 77a al. 2 CP indique que cette condition n'est pas absolue et peut être adaptée aux circonstances individuelles, notamment lorsque le condamné a déjà purgé une partie significative de sa peine en détention provisoire ou pour des motifs de sûreté. La cour cantonale a violé le droit fédéral en exigeant de manière rigide un séjour en milieu ouvert comme condition préalable à l'octroi du travail externe. Le recours est admis, l'arrêt cantonal est annulé, et la cause est renvoyée pour une nouvelle décision sur la base des conditions prévues à l'art. 77a CP (consid. 2.5.1 à 2.5.3).
+
+    ACCURACY_FAITHFULNESS:  
+    Analysis: The model-generated headnote accurately reflects the legal principle and conditions for granting external work under Art. 77a CP.
+    ACCURACY_FAITHFULNESS_SCORE: 3
+
+    COMPLETENESS_RELEVANCE:  
+    Analysis: The model-generated headnote includes all relevant aspects of the official headnote. However, it adds additional details regarding the use of the term "en principe" and the violation of federal law by the cantonal court. While these details provide context, they are not essential for a concise headnote that shapes future legislation.
+    COMPLETENESS_RELEVANCE_SCORE: 2
+
+    CLARITY_COHERENCE:  
+    Analysis: The model-generated headnote is clear and well-organized, but the inclusion of specific details may obscure the broader legal principle.
+    CLARITY_COHERENCE_SCORE: 2
+
+    ARTICLES:  
+    Analysis: The model-generated headnote includes extra legal articles (Art. 164 ff. RSPC) not cited in the official headnote, deviating from its intended focus. Besides this, the reference to Art. 77a CP aligns with the official headnote.
+    ARTICLES_SCORE: 2
+
+    CONSIDERATIONS:  
+    Analysis: The official headnote only cites consideration E 2.5.2, while the model-generated headnote references considerations E 2.5.1 to E 2.5.3. This makes the model-generated headnote less precise.
+    CONSIDERATIONS_SCORE: 2
+    """
+)
+
+# Sample id: 59894; decision id: 148 I 97
+SLDS_JUDGE_ONE_SHOT_EXAMPLE_IT = dedent(
+    """
+    Official (Gold) Headnote:
+    Art. 24 Cost.; libertà di domicilio; residenza secondaria per motivi professionali; autorizzazione di soggiorno.  Contenuto e portata della libertà di domicilio garantita dall'art. 24 Cost. (consid. 3.2.1). In tale ambito le competenze dei Cantoni e dei Comuni sono circoscritte al controllo e alla registrazione degli abitanti (consid. 3.3.1). L'obbligo di annunciarsi, in caso di soggiorno in un Comune differente da quello del domicilio per motivi professionali, non limita l'esercizio della libertà di domicilio. Detto annuncio non può però essere sottoposto ad un regime autorizzativo (consid. 3.3.3).
+
+    Model-Generated Headnote:
+    Art. 24 Cost.; libertà di domicilio; regime autorizzativo per il soggiorno; competenze comunali. La libertà di domicilio garantita dall'art. 24 Cost. consente a ogni cittadino svizzero di eleggere liberamente il proprio luogo di residenza o soggiorno sul territorio nazionale, senza che ciò possa essere sottoposto a un regime autorizzativo di polizia. Le autorità comunali possono richiedere unicamente una notifica al momento dell'arrivo nel Comune, finalizzata alla registrazione e al controllo degli abitanti, ma non possono imporre un'autorizzazione di soggiorno con scadenza annuale, poiché ciò costituirebbe una violazione della libertà di domicilio (consid. 3.3.3). Il sistema instaurato dalle Direttive MOVPOP, che prevede il rilascio di un'"autorizzazione di soggiorno" con validità limitata, deve essere interpretato nel senso che l'autorità comunale può solo certificare formalmente la notifica del soggiorno, senza sottoporre quest'ultimo a un regime autorizzativo (consid. 3.3.2 e 3.3.3). La conferma di un tale regime da parte del Tribunale cantonale amministrativo viola pertanto l'art. 24 Cost. e deve essere annullata (consid. 3.4).
+
+    ACCURACY_FAITHFULNESS:  
+    Analysis: The model-generated headnote aligns with the core legal meaning but includes additional details (e.g., MOVPOP directives) not in the official headnote. These do not conflict but shift the focus slightly.
+    ACCURACY_FAITHFULNESS_SCORE: 2
+
+    COMPLETENESS_RELEVANCE:  
+    Analysis: The model-generated headnote captures key points but omits emphasis on secondary residence for professional reasons and cantonal/communal roles. Irrelevant details (e.g., MOVPOP) add complexity. 
+    COMPLETENESS_RELEVANCE_SCORE: 2
+
+    CLARITY_COHERENCE:  
+    Analysis: The model-generated headnote is clear and organized, but additional elements like MOVPOP reduce coherence by shifting focus away from the main points and making the text longer and more complex.
+    CLARITY_COHERENCE_SCORE: 2
+
+    ARTICLES:  
+    Analysis: References to Art. 24 Cost. are correct and complete.
+    ARTICLES_SCORE: 3
+
+    CONSIDERATIONS:  
+    Analysis: The model-generated headnote correctly references consid. 3.3.3 but adds consid. 3.3.2 and 3.4, which are beyond the official headnote's scope. Moreover, it leaves out consid 3.2.1 and 3.3.1, reducing precision. Instead, it mentiones consid. 3.3.3 twice, which is redundant.
+    CONSIDERATIONS_SCORE: 1
+    """
+)
+
+SLDS_GENERATION_SYSTEM_PROMPT = dedent(
+    """
+    You are a legal expert specializing in Swiss Federal Supreme Court decisions with extensive knowledge of legal terminology and conventions in German, French, and Italian. Your task is to generate a headnote for a provided leading decision. A headnote is a concise summary that captures the key legal points and significance of the decision. It is not merely a summary of the content but highlights the aspects that make the decision "leading" and important for future legislation.
+
+    When generating the headnote:
+
+    1. Focus on the core legal reasoning and key considerations that establish the decision's significance.
+    2. Include any relevant references to legal articles (prefixed with "Art.") and considerations (prefixed with "E." in German or "consid." in French/Italian).
+    3. Use precise legal terminology and adhere to the formal and professional style typical of Swiss Federal Supreme Court headnotes.
+    4. Ensure clarity and coherence, so the headnote is logically structured and easy to understand in the specified language.
+    
+    Your response should consist solely of the headnote in the language specified by the user prompt.
+    """
+)
+
 
 class JudgeSwissLegalTranslation(JudgeLLM):
     def compute(
@@ -275,6 +462,104 @@ class JudgeSwissLegalTranslation(JudgeLLM):
 
         scores, _, judgements = self.judge.evaluate_answer_batch(questions, predictions, options, golds)
         # Exclude the messages (user prompt) because they are too long
+        return [
+            {
+                self.short_judge_name: score * 100,
+                f"{self.short_judge_name}_judgment": judgment,
+            }
+            for score, judgment in zip(scores, judgements)
+        ]
+
+
+class JudgeSwissLeadingDecisionSummarization(JudgeLLM):
+    def __init__(
+        self,
+        judge_model_name: str,
+        judge_backend: str,
+        short_judge_name: str,
+        language: Literal["de", "fr", "it"],
+    ):
+        self.language = language
+        self.score_extraction_pattern = r"^\s*([A-Z_]+_SCORE):\s*(\d+)\s*$"
+        self.metric_names = (
+            "ACCURACY_FAITHFULNESS_SCORE",
+            "COMPLETENESS_RELEVANCE_SCORE",
+            "CLARITY_COHERENCE_SCORE",
+            "ARTICLES_SCORE",
+            "CONSIDERATIONS_SCORE",
+        )
+
+        super().__init__(
+            judge_model_name, self._template, self._process_judge_response, judge_backend, short_judge_name
+        )
+
+    def _template(
+        self,
+        question: str,
+        answer: str,
+        options: Optional[list[str]] = None,
+        gold: Optional[list[str]] = None,
+    ) -> list[dict[str, str]]:
+        """Template for evaluating the Swiss Leading Decision Summarization task based only on the original and the generated headnotes."""
+
+        # Remove leading and trailing whitespaces
+        system_prompt = SLDS_JUDGE_SYSTEM_PROMPT.strip()
+        user_prompt = SLDS_JUDGE_USER_PROMPT.strip()
+
+        if self.language == "de":
+            one_shot_example = SLDS_JUDGE_ONE_SHOT_EXAMPLE_DE.strip()
+        elif self.language == "fr":
+            one_shot_example = SLDS_JUDGE_ONE_SHOT_EXAMPLE_FR.strip()
+        elif self.language == "it":
+            one_shot_example = SLDS_JUDGE_ONE_SHOT_EXAMPLE_IT.strip()
+
+        # Fill template with original and generated headnote
+        user_prompt = user_prompt.format(
+            original_headnote=gold,
+            generated_headnote=answer,
+            one_shot_example=one_shot_example,
+        )
+
+        return [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+
+    def _process_judge_response(self, response: str) -> float:
+        """Process the judge responses and extract the scores for each category."""
+        sample_scores = re.findall(pattern=self.score_extraction_pattern, string=response, flags=re.MULTILINE)
+
+        if len(sample_scores) != 5:
+            logger.warning("Could only extract %d out of 5 scores from the response: %s", len(sample_scores), response)
+
+        aggregated_score = 0
+        for metric_name, score in sample_scores:
+            if metric_name not in self.metric_names:
+                logger.warning("Invalid metric name: %s", metric_name)
+                continue
+
+            # Transform scale from 1-3 to 0-2
+            aggregated_score += int(score) - 1
+
+        # Divide be the maximum possible score
+        aggregated_score /= len(self.metric_names) * 2
+
+        return aggregated_score
+
+    def compute(
+        self,
+        sample_ids: list[str],
+        responses: list,
+        formatted_docs: list[Doc],
+        **kwargs,
+    ) -> list[dict]:
+        logger.info(f"Judging {len(formatted_docs)} samples with {self.short_judge_name}...")
+
+        irrelevant_param = [None for _ in formatted_docs]
+        original_headnotes = [formatted_doc.get_golds()[0] for formatted_doc in formatted_docs]
+        generated_headnotes = [response[0].result for response in responses]
+
+        # Exclude the messages (user prompt) because they are too long
+        scores, _, judgements = self.judge.evaluate_answer_batch(
+            questions=irrelevant_param, answers=generated_headnotes, options=irrelevant_param, golds=original_headnotes
+        )
         return [
             {
                 self.short_judge_name: score * 100,
@@ -329,6 +614,32 @@ Your Judgment:
     )
 
 
+def get_swiss_leading_decision_summarization_judge(
+    language: Literal["de", "fr", "it"],
+    model_name: str = "together_ai/deepseek-ai/DeepSeek-V3",
+    short_judge_name: str = "slds_judge_deepseek_v3",
+    backend: str = "litellm",
+):
+    judge = JudgeSwissLeadingDecisionSummarization(
+        judge_model_name=model_name,
+        judge_backend=backend,
+        short_judge_name=short_judge_name,
+        language=language,
+    )
+
+    # Increase the API_MAX_RETRY to 60 for this judge
+    judge.judge.API_MAX_RETRY = 60
+
+    return SampleLevelMetricGrouping(
+        metric_name=[short_judge_name],
+        higher_is_better={short_judge_name: True},
+        category=MetricCategory.LLM_AS_JUDGE,
+        use_case=MetricUseCase.SUMMARIZATION,
+        sample_level_fn=judge.compute,
+        corpus_level_fn={short_judge_name: statistics.mean},
+    )
+
+
 class GEMBA:
     def __init__(self, method: str = "GEMBA-MQM_norm", model: str = "gpt-4o"):
         self.method = method
@@ -378,7 +689,14 @@ def get_gemba_judge(method: str = "GEMBA-MQM_norm", model: str = "gpt-4o"):
     )
 
 
-def get_bert_score(language: str, num_layers: int = 24, model_type: str = "xlm-roberta-large", device: str = "cpu"):
+def get_bert_score(
+    language: str,
+    num_layers: int = 24,
+    model_type: str = "xlm-roberta-large",
+    device: str = "cpu",
+    metric_category: MetricCategory = MetricCategory.GENERATIVE,
+    metric_use_case: MetricUseCase = MetricUseCase.TRANSLATION,
+):
     if device == "mps":
         raise ValueError("MPS is not supported for BERTScore")
     logger.info(
@@ -421,8 +739,8 @@ def get_bert_score(language: str, num_layers: int = 24, model_type: str = "xlm-r
             "BERTScore-R": True,
             "BERTScore-F": True,
         },
-        category=MetricCategory.GENERATIVE,
-        use_case=MetricUseCase.TRANSLATION,
+        category=metric_category,
+        use_case=metric_use_case,
         sample_level_fn=lambda *args, **kwargs: {k: v * 100 for k, v in score.compute(*args, **kwargs).items()},
         corpus_level_fn={
             "BERTScore-P": statistics.mean,
@@ -637,8 +955,9 @@ class METEOR:
 
         NLTK_VERSION = version.parse(importlib_metadata.version("nltk"))
         assert NLTK_VERSION >= version.Version("3.9.0"), "NLTK version must be >= 3.9.0"
-        nltk.download("punkt_tab")
-        nltk.download("wordnet")
+
+        nltk.download("punkt_tab", quiet=True)
+        nltk.download("wordnet", quiet=True)
 
     def compute(self, golds: list[str], predictions: list[str], **kwargs) -> float:
         if isinstance(golds[0], list):  # multiple references
@@ -667,12 +986,15 @@ class METEOR:
         return statistics.mean(scores) * 100
 
 
-def get_meteor():
+def get_meteor(
+    metric_category: MetricCategory = MetricCategory.GENERATIVE,
+    metric_use_case: MetricUseCase = MetricUseCase.TRANSLATION,
+):
     return SampleLevelMetric(
         metric_name="meteor",
         higher_is_better=True,
-        category=MetricCategory.GENERATIVE,
-        use_case=MetricUseCase.TRANSLATION,
+        category=metric_category,
+        use_case=metric_use_case,
         sample_level_fn=METEOR().compute,
         corpus_level_fn=statistics.mean,
     )
@@ -882,8 +1204,8 @@ slds_languages = ["de", "fr", "it"]
 
 
 def get_slds_filter_fn(decision_language: str, headnote_language: str):
-    def filter_dataset(dataset):
-        return dataset["decision_language"] == decision_language and dataset["headnote_language"] == headnote_language
+    def filter_dataset(example):
+        return example["decision_language"] == decision_language and example["headnote_language"] == headnote_language
 
     return filter_dataset
 
@@ -960,7 +1282,9 @@ def slds_prompt_fn(line: dict, task_name: str = None):
     """
     Create a prompt for the Swiss Legal Decision Summaries dataset.
     """
-    template = "Generate a headnote in {language} for the following leading decision: {decision}"
+    template = (
+        "Leading decision:\n```{decision}```\n\nGenerate a headnote in {language} for the leading decision above."
+    )
 
     return Doc(
         task_name=task_name,
@@ -974,7 +1298,8 @@ def slds_prompt_fn(line: dict, task_name: str = None):
             "headnote_language": line["headnote_language"],
             "law_area": line["law_area"],
             "year": line["year"],
-            "text": line["decision"],  # Needs to be called like this for extractiveness metric
+            "text": line["decision"],  # Needs to be called "text" for the extractiveness metric
+            "headnote": line["headnote"],
         },
     )
 
@@ -1202,6 +1527,7 @@ class HeadnoteGenerationTask(LightevalTaskConfig):
     ):
         level_config = dataset_config.subsets[level_name]
         headnote_language = dataset_config.subsets[level_name].custom_attributes["headnote_language"]
+
         super().__init__(
             name=f"{dataset_config.name}:{level_name}",
             suite=["community"],
@@ -1209,22 +1535,103 @@ class HeadnoteGenerationTask(LightevalTaskConfig):
             hf_repo="rcds/slds",
             hf_subset=level_name,
             hf_filter=level_config.dataset_filter,
-            hf_avail_splits=["train", "validation", "test"],
+            hf_avail_splits=["train", "validation", "test", "one_shot_examples"],
             evaluation_splits=["test"],
-            few_shots_split="validation",
-            few_shots_select="sequential",
+            few_shots_split="one_shot_examples",
+            few_shots_select="random",
             generation_size=level_config.generation_size,
-            metric=[
-                get_bert_score(language=headnote_language, model_type="xlm-roberta-large", device=device),
-                Metrics.bleu,
-                get_meteor(),
-                Metrics.rouge1,
-                Metrics.rouge2,
-                Metrics.rougeL,
-                Metrics.extractiveness,
-            ],
+            metric=self._get_metrics(headnote_language),
             stop_sequence=level_config.stop_sequence,
             trust_dataset=True,
+        )
+
+    def _get_metrics(self, headnote_language: Literal["de", "fr", "it"]) -> list[Metrics]:
+        return [
+            get_swiss_leading_decision_summarization_judge(
+                language=headnote_language,
+                # model_name="gpt-4o-mini",
+                # short_judge_name="slds_judge_gpt-4o-mini",
+            ),
+            get_bert_score(
+                language=headnote_language,
+                model_type="xlm-roberta-large",
+                device=device,
+                metric_category=MetricCategory.GENERATIVE_SAMPLING,
+                metric_use_case=MetricUseCase.SUMMARIZATION,
+            ),
+            get_meteor(
+                metric_category=MetricCategory.GENERATIVE_SAMPLING, metric_use_case=MetricUseCase.SUMMARIZATION
+            ),
+            self._get_bleu(),
+            self._get_rouge1(),
+            self._get_rouge2(),
+            self._get_rougeL(),
+            self._get_extractiveness(),
+        ]
+
+    def _get_bleu(self) -> Metrics:
+        # Adapted from Metrics.bleu
+        return CorpusLevelMetric(
+            metric_name="bleu",
+            sample_level_fn=GenerativePreparator().prepare,
+            category=MetricCategory.GENERATIVE_SAMPLING,
+            use_case=MetricUseCase.SUMMARIZATION,
+            corpus_level_fn=CorpusLevelTranslationMetric("bleu").compute,
+            higher_is_better=True,
+        )
+
+    def _get_rouge1(self) -> Metrics:
+        # Adapted from Metrics.rouge1
+        return SampleLevelMetric(
+            metric_name="rouge1",
+            sample_level_fn=ROUGE("rouge1").compute,
+            category=MetricCategory.GENERATIVE_SAMPLING,
+            use_case=MetricUseCase.SUMMARIZATION,
+            corpus_level_fn=np.mean,
+            higher_is_better=True,
+        )
+
+    def _get_rouge2(self) -> Metrics:
+        # Adapted from Metrics.rouge2
+        return SampleLevelMetric(
+            metric_name="rouge2",
+            sample_level_fn=ROUGE("rouge2").compute,
+            category=MetricCategory.GENERATIVE_SAMPLING,
+            use_case=MetricUseCase.SUMMARIZATION,
+            corpus_level_fn=np.mean,
+            higher_is_better=True,
+        )
+
+    def _get_rougeL(self) -> Metrics:
+        # Adapted from Metrics.rougeL
+        return SampleLevelMetric(
+            metric_name="rougeL",
+            sample_level_fn=ROUGE("rougeL").compute,
+            category=MetricCategory.GENERATIVE_SAMPLING,
+            use_case=MetricUseCase.SUMMARIZATION,
+            corpus_level_fn=np.mean,
+            higher_is_better=True,
+        )
+
+    def _get_extractiveness(self) -> Metrics:
+        # Adapted from Metrics.extractiveness
+        return SampleLevelMetricGrouping(
+            metric_name=["summarization_coverage", "summarization_density", "summarization_compression"],
+            sample_level_fn=Extractiveness(
+                normalize_input=remove_braces, normalize_pred=remove_braces_and_strip, input_column="text"
+            ).compute,
+            category=MetricCategory.GENERATIVE_SAMPLING,
+            use_case=MetricUseCase.SUMMARIZATION,
+            corpus_level_fn={
+                "summarization_coverage": np.mean,
+                "summarization_density": np.mean,
+                "summarization_compression": np.mean,
+            },
+            higher_is_better={
+                "summarization_coverage": True,
+                "summarization_density": True,
+                "summarization_compression": True,
+            },
         )
 
 
