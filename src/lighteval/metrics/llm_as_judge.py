@@ -44,7 +44,7 @@ class JudgeLM:
         model (str): The name of the model.
         templates (Callable): A function taking into account the question, options, answer, and gold and returning the judge prompt.
         process_judge_response (Callable): A function for processing the judge's response.
-        judge_backend (Literal["openai", "transformers", "tgi", "vllm"]): The backend for the judge.
+        judge_backend (Literal["litellm", "openai", "transformers", "tgi", "vllm"]): The backend for the judge.
         url (str | None): The URL for the OpenAI API.
         api_key (str | None): The API key for the OpenAI API (either OpenAI or HF key).
 
@@ -199,7 +199,7 @@ class JudgeLM:
                         model=self.model,
                         messages=prompt,
                         response_format={"type": "text"},
-                        max_tokens=512,
+                        max_tokens=1024,
                         n=1,
                         caching=True,
                     )
