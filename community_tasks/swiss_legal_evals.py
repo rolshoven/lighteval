@@ -1556,12 +1556,10 @@ class HeadnoteGenerationTask(LightevalTaskConfig):
                 language=headnote_language,
                 model_type="xlm-roberta-large",
                 device=device,
-                metric_category=MetricCategory.GENERATIVE_SAMPLING,
+                metric_category=MetricCategory.GENERATIVE,
                 metric_use_case=MetricUseCase.SUMMARIZATION,
             ),
-            get_meteor(
-                metric_category=MetricCategory.GENERATIVE_SAMPLING, metric_use_case=MetricUseCase.SUMMARIZATION
-            ),
+            get_meteor(metric_category=MetricCategory.GENERATIVE, metric_use_case=MetricUseCase.SUMMARIZATION),
             self._get_bleu(),
             self._get_rouge1(),
             self._get_rouge2(),
@@ -1574,7 +1572,7 @@ class HeadnoteGenerationTask(LightevalTaskConfig):
         return CorpusLevelMetric(
             metric_name="bleu",
             sample_level_fn=GenerativePreparator().prepare,
-            category=MetricCategory.GENERATIVE_SAMPLING,
+            category=MetricCategory.GENERATIVE,
             use_case=MetricUseCase.SUMMARIZATION,
             corpus_level_fn=CorpusLevelTranslationMetric("bleu").compute,
             higher_is_better=True,
@@ -1585,7 +1583,7 @@ class HeadnoteGenerationTask(LightevalTaskConfig):
         return SampleLevelMetric(
             metric_name="rouge1",
             sample_level_fn=ROUGE("rouge1").compute,
-            category=MetricCategory.GENERATIVE_SAMPLING,
+            category=MetricCategory.GENERATIVE,
             use_case=MetricUseCase.SUMMARIZATION,
             corpus_level_fn=np.mean,
             higher_is_better=True,
@@ -1596,7 +1594,7 @@ class HeadnoteGenerationTask(LightevalTaskConfig):
         return SampleLevelMetric(
             metric_name="rouge2",
             sample_level_fn=ROUGE("rouge2").compute,
-            category=MetricCategory.GENERATIVE_SAMPLING,
+            category=MetricCategory.GENERATIVE,
             use_case=MetricUseCase.SUMMARIZATION,
             corpus_level_fn=np.mean,
             higher_is_better=True,
@@ -1607,7 +1605,7 @@ class HeadnoteGenerationTask(LightevalTaskConfig):
         return SampleLevelMetric(
             metric_name="rougeL",
             sample_level_fn=ROUGE("rougeL").compute,
-            category=MetricCategory.GENERATIVE_SAMPLING,
+            category=MetricCategory.GENERATIVE,
             use_case=MetricUseCase.SUMMARIZATION,
             corpus_level_fn=np.mean,
             higher_is_better=True,
@@ -1620,7 +1618,7 @@ class HeadnoteGenerationTask(LightevalTaskConfig):
             sample_level_fn=Extractiveness(
                 normalize_input=remove_braces, normalize_pred=remove_braces_and_strip, input_column="text"
             ).compute,
-            category=MetricCategory.GENERATIVE_SAMPLING,
+            category=MetricCategory.GENERATIVE,
             use_case=MetricUseCase.SUMMARIZATION,
             corpus_level_fn={
                 "summarization_coverage": np.mean,
