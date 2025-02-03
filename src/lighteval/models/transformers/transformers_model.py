@@ -34,31 +34,19 @@ from pydantic import Field, PositiveInt
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import (
-    AutoConfig,
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    BitsAndBytesConfig,
-    PretrainedConfig,
-)
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, PretrainedConfig
 from transformers.generation.configuration_utils import GenerationConfig
 from transformers.generation.utils import GenerateOutput
 
 from lighteval.data import GenerativeTaskDataset, LoglikelihoodDataset
 from lighteval.models.abstract_model import LightevalModel, ModelConfig
-from lighteval.models.model_output import (
-    Batch,
-    ModelResponse,
-)
+from lighteval.models.model_output import Batch, ModelResponse
 from lighteval.models.utils import _get_dtype, _get_model_sha, _simplify_name, uses_chat_template
 from lighteval.tasks.prompt_manager import PromptManager
 from lighteval.tasks.requests import Doc
 from lighteval.utils.cache_management import SampleCache, cached
-from lighteval.utils.imports import (
-    is_accelerate_available,
-)
+from lighteval.utils.imports import is_accelerate_available
 from lighteval.utils.parallelism import find_executable_batch_size
-
 
 logger = logging.getLogger(__name__)
 
@@ -687,12 +675,13 @@ class TransformersModel(LightevalModel):
 
                 # See doc https://huggingface.co/docs/transformers/v4.38.2/en/pad_truncation#padding-and-truncation
                 # Will do left truncation and padding, as defined when creating the tokenizer
+
                 tokenized = self.tokenizer(
                     contexts,
                     truncation="longest_first",  # we truncate to the model max length if needed
                     padding="longest",  # we pad to the longest sequence
                     return_tensors="pt",
-                    max_length=max_context_continuation_size_allowed,  # we always allow minimum one token of generation
+                    max_length=max_length,  # we always allow minimum one token of generation
                     add_special_tokens=self.add_special_tokens,
                 ).to(self.device)
 
@@ -1005,7 +994,9 @@ class TransformersModel(LightevalModel):
                         # Obtain log-probs at the corresponding continuation token indices
                         choice_logits = torch.gather(
                             choice_logits, 2, choice_continuation_tensor.unsqueeze(-1)
-                        ).squeeze(-1)  # [1, seq]
+                        ).squeeze(
+                            -1
+                        )  # [1, seq]
 
                         # Answer: (log prob, is-exact-match)
                         doc_logits_sums.append(choice_logits.sum())
