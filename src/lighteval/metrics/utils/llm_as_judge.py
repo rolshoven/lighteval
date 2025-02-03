@@ -284,6 +284,10 @@ class JudgeLM:
 
     def __call_litellm(self, prompts):
         import litellm
+        from litellm.caching.caching import Cache, LiteLLMCacheType
+
+        litellm.cache = Cache(type=LiteLLMCacheType.DISK)
+        litellm.drop_params = True
 
         def __call_api(prompt):
             error_message = "ERROR: Failed to get response from the API."
