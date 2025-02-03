@@ -672,9 +672,9 @@ class TransformersModel(LightevalModel):
             generation_config.update(
                 {
                     "max_new_tokens": max_generated_tokens,
-                    "pad_token_id": self.tokenizer.pad_token_id
-                    if self.tokenizer.pad_token_id
-                    else self.tokenizer.eos_token_id,
+                    "pad_token_id": (
+                        self.tokenizer.pad_token_id if self.tokenizer.pad_token_id else self.tokenizer.eos_token_id
+                    ),
                     "eos_token_id": self.tokenizer.eos_token_id,
                     "do_sample": False,
                 }
@@ -721,9 +721,9 @@ class TransformersModel(LightevalModel):
                 generation_config.update(
                     {
                         "max_new_tokens": max_generated_tokens,
-                        "pad_token_id": self.tokenizer.pad_token_id
-                        if self.tokenizer.pad_token_id
-                        else self.tokenizer.eos_token_id,
+                        "pad_token_id": (
+                            self.tokenizer.pad_token_id if self.tokenizer.pad_token_id else self.tokenizer.eos_token_id
+                        ),
                         "eos_token_id": self.tokenizer.eos_token_id,
                         "do_sample": False,
                     }
@@ -841,16 +841,24 @@ class TransformersModel(LightevalModel):
                 num_samples = batch[0].num_samples
                 do_sample = batch[0].do_sample
 
+                largest_sample_in_batch = len(batch[0].tokenized_context)
+                if batch[0].generation_size:
+                    max_generation_size = batch[0].generation_size
+                else:
+                    max_generation_size = self.max_length - largest_sample_in_batch
+                max_length = min(largest_sample_in_batch + max_generation_size, self.max_length)
+
                 context = [c.context for c in batch]
 
                 # See doc https://huggingface.co/docs/transformers/v4.38.2/en/pad_truncation#padding-and-truncation
                 # Will do left truncation and padding, as defined when creating the tokenizer
+
                 tokenized = self.tokenizer(
                     context,
                     truncation="longest_first",  # we truncate to the model max length if needed
                     padding="max_length",  # we pad to the longest sequence
                     return_tensors="pt",
-                    max_length=max_context_continuation_size_allowed,  # we always allow minimum one token of generation
+                    max_length=max_length,  # we always allow minimum one token of generation
                     add_special_tokens=self.add_special_tokens,
                 ).to(self.device)
 
@@ -1301,7 +1309,9 @@ class TransformersModel(LightevalModel):
 
                     cont_toks = torch.tensor(
                         cur_request.tokenized_continuation, dtype=torch.long, device=self.device
-                    ).squeeze(-1)  # [num_choices]
+                    ).squeeze(
+                        -1
+                    )  # [num_choices]
 
                     # Obtain log-probs at the corresponding continuation token indices
                     # last_token_slice = logits[:, -1, :].squeeze(0).tolist()
