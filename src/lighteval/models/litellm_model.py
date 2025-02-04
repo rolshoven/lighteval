@@ -64,8 +64,15 @@ if is_litellm_available():
 @dataclass
 class LiteLLMModelConfig:
     model: str
+    api_base: Optional[str] = None
     use_cache: Optional[bool] = True
     generation_parameters: Optional[GenerationParameters] = None
+
+    concurrent_calls: Optional[int] = 20  # 100 leads to hitting Anthropic rate limits
+    api_max_retry: Optional[int] = 8
+    api_retry_sleep: Optional[int] = 3
+    api_retry_multiplier: Optional[int] = 2
+
     success_callback: Optional[List[Union[str, Callable]]] = None
     failure_callback: Optional[List[Union[str, Callable]]] = None
 
@@ -96,6 +103,7 @@ class LiteLLMClient(LightevalModel):
         self.generation_parameters = config.generation_parameters
         self.sampling_params = self.generation_parameters.to_litellm_dict()
         self.use_cache = config.use_cache
+        self.api_base = config.api_base
 
         self.model_info = ModelInfo(
             model_name=config.model,
@@ -105,10 +113,10 @@ class LiteLLMClient(LightevalModel):
         )
         self.provider = config.model.split("/")[0]
         self.base_url = os.getenv(f"{self.provider.upper()}_BASE_URL", None)
-        self.API_MAX_RETRY = 8
-        self.API_RETRY_SLEEP = 3
-        self.API_RETRY_MULTIPLIER = 2
-        self.CONCURENT_CALLS = 1  # 100 leads to hitting Anthropic rate limits
+        self.API_MAX_RETRY = config.api_max_retry
+        self.API_RETRY_SLEEP = config.api_retry_sleep
+        self.API_RETRY_MULTIPLIER = config.api_retry_multiplier
+        self.CONCURENT_CALLS = config.concurrent_calls
         self.model = config.model
         self._tokenizer = encode
         self.pairwise_tokenization = False
@@ -117,9 +125,11 @@ class LiteLLMClient(LightevalModel):
 
         if config.success_callback:
             litellm.success_callback = config.success_callback
+            config.success_callback = None  # Avoid error during generation of final dict in evaluation tracker
 
         if config.failure_callback:
             litellm.failure_callback = config.failure_callback
+            config.failure_callback = None  # Avoid error during generation of final dict in evaluation tracker
 
     def _prepare_stop_sequence(self, stop_sequence):
         """Prepare and validate stop sequence."""
@@ -165,6 +175,9 @@ class LiteLLMClient(LightevalModel):
                     "caching": self.use_cache,
                     **self.sampling_params,
                 }
+
+                if self.api_base:
+                    kwargs["api_base"] = self.api_base
 
                 response = litellm.completion(**kwargs)
 
