@@ -26,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Union
 
+import tokenizers
 from tqdm import tqdm
 
 from lighteval.data import GenerativeTaskDataset
@@ -44,6 +45,7 @@ if is_litellm_available():
     from litellm import encode
     from litellm.caching.caching import Cache, LiteLLMCacheType
     from litellm.utils import ModelResponse as LitellmModelResponse
+    from litellm.utils import create_pretrained_tokenizer
 
     logging.getLogger("LiteLLM").setLevel(logging.WARNING)
     logging.getLogger("LiteLLM").handlers.clear()
@@ -110,6 +112,7 @@ class LiteLLMModelConfig(ModelConfig):
     base_url: str | None = None
     api_key: str | None = None
     concurrent_requests: int = 10
+    custom_huggingface_tokenizer: Optional[str] = None
     api_base: Optional[str] = None
     use_cache: Optional[bool] = True
     generation_parameters: Optional[GenerationParameters] = None
@@ -134,7 +137,17 @@ class LiteLLMModelConfig(ModelConfig):
             config = yaml.safe_load(f)["model"]
         generation_parameters = GenerationParameters.from_dict(config)
         return cls(
-            model=config["model_name"], use_cache=config["use_cache"], generation_parameters=generation_parameters
+            model=config["model_name"],
+            api_base=config["api_base"],
+            use_cache=config["use_cache"],
+            custom_huggingface_tokenizer=config["custom_huggingface_tokenizer"],
+            concurrent_calls=config["concurrent_calls"],
+            api_max_retry=config["api_max_retry"],
+            api_retry_sleep=config["api_retry_sleep"],
+            api_retry_multiplier=config["api_retry_multiplier"],
+            success_callback=config["success_callback"],
+            failure_callback=config["failure_callback"],
+            generation_parameters=generation_parameters,
         )
 
 
@@ -149,6 +162,12 @@ class LiteLLMClient(LightevalModel):
         self.sampling_params = self.generation_parameters.to_litellm_dict()
         self.use_cache = config.use_cache
         self.api_base = config.api_base
+
+        if config.custom_huggingface_tokenizer:
+            logger.info("Using custom hugging face tokenizer from repository %s", config.custom_huggingface_tokenizer)
+            self.custom_tokenizer = create_pretrained_tokenizer(config.custom_huggingface_tokenizer)
+        else:
+            self.custom_tokenizer = None
 
         self.config = config
         self.model = config.model_name
@@ -353,6 +372,21 @@ class LiteLLMClient(LightevalModel):
     @property
     def tokenizer(self):
         return self._tokenizer
+
+    def tok_encode(self, text: str | list[str]):
+        if isinstance(text, list):
+            toks = [encode(model=self.model, text=t["content"], custom_tokenizer=self.custom_tokenizer) for t in text]
+            toks = [tok for tok in toks if tok]
+        else:
+            toks = encode(model=self.model, text=text, custom_tokenizer=self.custom_tokenizer)
+
+        # Handle Hugging Face tokenizers
+        if isinstance(toks, list) and len(toks) > 0 and isinstance(toks[0], tokenizers.Encoding):
+            toks = [t.ids for t in toks]
+        if isinstance(toks, tokenizers.Encoding):
+            toks = toks.ids
+
+        return toks
 
     @property
     def add_special_tokens(self) -> bool:
