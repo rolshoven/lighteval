@@ -21,6 +21,8 @@
 # SOFTWARE.
 
 import logging
+import os
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -33,9 +35,8 @@ from lighteval.data import GenerativeTaskDataset
 from lighteval.models.abstract_model import LightevalModel, ModelConfig
 from lighteval.models.model_input import GenerationParameters
 from lighteval.models.model_output import ModelResponse
-from lighteval.tasks.prompt_manager import PromptManager
 from lighteval.tasks.requests import Doc
-from lighteval.utils.cache_management import SampleCache, cached
+from lighteval.utils.cache_management import cached
 from lighteval.utils.imports import is_litellm_available
 
 logger = logging.getLogger(__name__)
@@ -119,8 +120,9 @@ class LiteLLMModelConfig(ModelConfig):
 
     concurrent_calls: Optional[int] = 20  # 100 leads to hitting Anthropic rate limits
     api_max_retry: Optional[int] = 8
-    api_retry_sleep: Optional[int] = 3
+    api_retry_sleep: Optional[int] = 1
     api_retry_multiplier: Optional[int] = 2
+    timeout: Optional[float] = None
 
     success_callback: Optional[List[Union[str, Callable]]] = None
     failure_callback: Optional[List[Union[str, Callable]]] = None
@@ -138,6 +140,7 @@ class LiteLLMModelConfig(ModelConfig):
         generation_parameters = GenerationParameters.from_dict(config)
         return cls(
             model=config["model_name"],
+            provider=config["provider"],
             api_base=config["api_base"],
             use_cache=config["use_cache"],
             custom_huggingface_tokenizer=config["custom_huggingface_tokenizer"],
@@ -145,6 +148,7 @@ class LiteLLMModelConfig(ModelConfig):
             api_max_retry=config["api_max_retry"],
             api_retry_sleep=config["api_retry_sleep"],
             api_retry_multiplier=config["api_retry_multiplier"],
+            timeout=config["timeout"],
             success_callback=config["success_callback"],
             failure_callback=config["failure_callback"],
             generation_parameters=generation_parameters,
@@ -161,6 +165,8 @@ class LiteLLMClient(LightevalModel):
         self.generation_parameters = config.generation_parameters
         self.sampling_params = self.generation_parameters.to_litellm_dict()
         self.use_cache = config.use_cache
+
+        # TODO: remove and just use base_url with environment variable
         self.api_base = config.api_base
 
         if config.custom_huggingface_tokenizer:
@@ -176,11 +182,19 @@ class LiteLLMClient(LightevalModel):
         self.api_key = config.api_key
         self.generation_parameters = config.generation_parameters
         self.concurrent_requests = config.concurrent_requests
+        self.model_info = ModelInfo(
+            model_name=config.model,
+            model_sha="",
+            model_dtype=None,
+            model_size="",
+        )
 
         self.API_MAX_RETRY = config.api_max_retry
         self.API_RETRY_SLEEP = config.api_retry_sleep
         self.API_RETRY_MULTIPLIER = config.api_retry_multiplier
         self.CONCURENT_CALLS = config.concurrent_calls
+        self.timeout = config.timeout
+
         self.model = config.model
         self._tokenizer = encode
         self.pairwise_tokenization = False
@@ -208,59 +222,80 @@ class LiteLLMClient(LightevalModel):
         if not max_new_tokens or max_new_tokens <= 0:
             return None
 
-        if "o1" in self.model:
+        if any([s in self.model for s in ["o1", "o3", "deepseek-reasoner", "R1"]]):
+
+            if "deepseek-reasoner" in self.model:
+                upper_bound = 8192
+            else:
+                upper_bound = 32000
+
             # We need to allow more tokens to include reasoning tokens
-            max_new_tokens = min(max_new_tokens * 10, 32000)
+            max_new_tokens = min(max_new_tokens * 10, upper_bound)
+
+            logger.warning(
+                "Reasoning model detected, increasing max_new_tokens to %d to allow for reasoning tokens",
+                max_new_tokens,
+            )
         return max_new_tokens
 
     def __call_api(self, prompt, return_logits, max_new_tokens, num_samples, stop_sequence):  # noqa: C901
         """Make API call with retries."""
+        if num_samples > 1 and self.generation_parameters.temperature == 0:
+            raise ValueError("num_samples > 1 but temperature is set to 0, this will not sample different outputs.")
+
         response = LitellmModelResponse()
+
+        stop_sequence = self._prepare_stop_sequence(stop_sequence)
+        max_new_tokens = self._prepare_max_new_tokens(max_new_tokens)
+
+        if return_logits and not self.provider == "openai":
+            logger.warning("Returning logits is not supported for this provider, ignoring.")
+
+        # Prepare kwargs for completion call
+        kwargs = {
+            "model": self.model,
+            "messages": prompt,
+            "response_format": {"type": "text"},
+            "max_tokens": max_new_tokens if max_new_tokens else None,
+            "logprobs": return_logits if self.provider == "openai" else None,
+            "stop": stop_sequence,
+            "base_url": self.base_url,
+            "api_key": self.api_key,
+            "n": num_samples,
+            "caching": self.use_cache,
+            "timeout": self.timeout,
+            **self.sampling_params,
+        }
+
+        if "o1" in self.model:
+            logger.warning("O1 models do not support temperature, top_p, stop sequence. Disabling.")
+        else:
+            kwargs.update(self.generation_parameters.to_litellm_dict())
+
+        if kwargs.get("max_completion_tokens", None) is None:
+            kwargs["max_completion_tokens"] = max_new_tokens
+
+        if self.api_base:
+            kwargs["api_base"] = self.api_base
+
         for attempt in range(self.API_MAX_RETRY):
             try:
-                stop_sequence = self._prepare_stop_sequence(stop_sequence)
-                max_new_tokens = self._prepare_max_new_tokens(max_new_tokens)
-
-                if return_logits and not self.provider == "openai":
-                    logger.warning("Returning logits is not supported for this provider, ignoring.")
-
-                # Prepare kwargs for completion call
-                kwargs = {
-                    "model": self.model,
-                    "messages": prompt,
-                    "response_format": {"type": "text"},
-                    "max_tokens": max_new_tokens if max_new_tokens else None,
-                    "logprobs": return_logits if self.provider == "openai" else None,
-                    "base_url": self.base_url,
-                    "n": num_samples,
-                    "caching": self.use_cache,
-                    "api_key": self.api_key,
-                    **self.sampling_params,
-                }
-
-                if num_samples > 1 and self.generation_parameters.temperature == 0:
-                    raise ValueError(
-                        "num_samples > 1 but temperature is set to 0, this will not sample different outputs."
-                    )
-
-                if "o1" in self.model:
-                    logger.warning("O1 models do not support temperature, top_p, stop sequence. Disabling.")
-                else:
-                    kwargs.update(self.generation_parameters.to_litellm_dict())
-
-                if kwargs.get("max_completion_tokens", None) is None:
-                    kwargs["max_completion_tokens"] = max_new_tokens
-
-                if self.api_base:
-                    kwargs["api_base"] = self.api_base
-
                 response = litellm.completion(**kwargs)
+                content = response.choices[0].message.content
 
                 # If response is empty, retry without caching (maybe the error is recoverable and solved with a retry)
-                if response.choices[0].message.content is None:
-                    kwargs["caching"] = False
+                if not content:
                     logger.info("Response is empty, retrying without caching")
+                    kwargs["caching"] = False
                     response = litellm.completion(**kwargs)
+                    content = response.choices[0].message.content
+
+                if content and "<think>" in content:
+                    logger.debug(f"Removing <think> tags from response: {content}")
+                    response.choices[0].message.content = re.sub(
+                        r"<think>.*?</think>", "", content, flags=re.DOTALL
+                    ).strip()
+
                 return response
             except litellm.BadRequestError as e:
                 if "message" in e.__dict__:
@@ -271,7 +306,9 @@ class LiteLLMClient(LightevalModel):
                         logger.warning(f"{error_string}. Returning empty response.")
                         return LitellmModelResponse()
             except Exception as e:
-                wait_time = min(64, self.API_RETRY_SLEEP * (2**attempt))  # Exponential backoff with max 64s
+                wait_time = min(
+                    64, self.API_RETRY_SLEEP * (self.API_RETRY_MULTIPLIER**attempt)
+                )  # Exponential backoff with max 64s
                 logger.warning(
                     f"Error in API call: {e}, waiting {wait_time} seconds before retry {attempt + 1}/{self.API_MAX_RETRY}"
                 )
