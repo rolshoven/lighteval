@@ -35,8 +35,9 @@ from lighteval.data import GenerativeTaskDataset
 from lighteval.models.abstract_model import LightevalModel, ModelConfig
 from lighteval.models.model_input import GenerationParameters
 from lighteval.models.model_output import ModelResponse
+from lighteval.tasks.prompt_manager import PromptManager
 from lighteval.tasks.requests import Doc
-from lighteval.utils.cache_management import cached
+from lighteval.utils.cache_management import SampleCache, cached
 from lighteval.utils.imports import is_litellm_available
 
 logger = logging.getLogger(__name__)
@@ -182,12 +183,6 @@ class LiteLLMClient(LightevalModel):
         self.api_key = config.api_key
         self.generation_parameters = config.generation_parameters
         self.concurrent_requests = config.concurrent_requests
-        self.model_info = ModelInfo(
-            model_name=config.model,
-            model_sha="",
-            model_dtype=None,
-            model_size="",
-        )
 
         self.API_MAX_RETRY = config.api_max_retry
         self.API_RETRY_SLEEP = config.api_retry_sleep
@@ -200,6 +195,12 @@ class LiteLLMClient(LightevalModel):
         self.pairwise_tokenization = False
         litellm.drop_params = True
         litellm.verbose = True
+        self.prompt_manager = PromptManager(
+            use_chat_template=True, tokenizer=self.tokenizer, system_prompt=config.system_prompt
+        )
+
+        # Initialize cache for tokenization and predictions
+        self._cache = SampleCache(config)
 
         if config.success_callback:
             litellm.success_callback = config.success_callback
