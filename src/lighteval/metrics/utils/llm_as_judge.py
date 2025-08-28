@@ -322,7 +322,7 @@ class JudgeLM:
             return error_message
 
         results = []
-        with ThreadPoolExecutor(100) as executor:
+        with ThreadPoolExecutor(10) as executor:
             for entry in tqdm(executor.map(__call_api, prompts), total=len(prompts)):
                 results.append(entry)
 
