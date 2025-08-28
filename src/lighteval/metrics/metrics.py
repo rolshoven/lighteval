@@ -26,9 +26,7 @@ from copy import deepcopy
 import numpy as np
 from aenum import Enum
 
-from lighteval.metrics.dynamic_metrics import (
-    MultilingualExtractiveMatchMetric,
-)
+from lighteval.metrics.dynamic_metrics import MultilingualExtractiveMatchMetric
 from lighteval.metrics.harness_compatibility.drop import DropMetrics
 from lighteval.metrics.harness_compatibility.truthful_qa import TruthfulqaMCMetrics
 from lighteval.metrics.metrics_corpus import (
@@ -57,11 +55,7 @@ from lighteval.metrics.metrics_sample import (
     Recall,
     StringDistance,
 )
-from lighteval.metrics.normalizations import (
-    bigbench_normalizer,
-    remove_braces,
-    remove_braces_and_strip,
-)
+from lighteval.metrics.normalizations import bigbench_normalizer, remove_braces, remove_braces_and_strip
 from lighteval.metrics.sample_preparator import (
     GenerativePreparator,
     LoglikelihoodPreparator,
@@ -230,6 +224,68 @@ class Metrics(Enum):
             "summarization_density": True,
             "summarization_compression": True,
         },
+    )
+    extractiveness_de = SampleLevelMetricGrouping(
+        metric_name=["summarization_coverage", "summarization_density", "summarization_compression"],
+        sample_level_fn=Extractiveness(
+            normalize_input=remove_braces, normalize_pred=remove_braces_and_strip, input_column="text", language="de"
+        ).compute,
+        category=MetricCategory.GENERATIVE,
+        use_case=MetricUseCase.SUMMARIZATION,
+        corpus_level_fn={
+            "summarization_coverage": np.mean,
+            "summarization_density": np.mean,
+            "summarization_compression": np.mean,
+        },
+        higher_is_better={
+            "summarization_coverage": True,
+            "summarization_density": True,
+            "summarization_compression": True,
+        },
+    )
+    extractiveness_fr = SampleLevelMetricGrouping(
+        metric_name=["summarization_coverage", "summarization_density", "summarization_compression"],
+        sample_level_fn=Extractiveness(
+            normalize_input=remove_braces, normalize_pred=remove_braces_and_strip, input_column="text", language="fr"
+        ).compute,
+        category=MetricCategory.GENERATIVE,
+        use_case=MetricUseCase.SUMMARIZATION,
+        corpus_level_fn={
+            "summarization_coverage": np.mean,
+            "summarization_density": np.mean,
+            "summarization_compression": np.mean,
+        },
+        higher_is_better={
+            "summarization_coverage": True,
+            "summarization_density": True,
+            "summarization_compression": True,
+        },
+    )
+    extractiveness_it = SampleLevelMetricGrouping(
+        metric_name=["summarization_coverage", "summarization_density", "summarization_compression"],
+        sample_level_fn=Extractiveness(
+            normalize_input=remove_braces, normalize_pred=remove_braces_and_strip, input_column="text", language="it"
+        ).compute,
+        category=MetricCategory.GENERATIVE,
+        use_case=MetricUseCase.SUMMARIZATION,
+        corpus_level_fn={
+            "summarization_coverage": np.mean,
+            "summarization_density": np.mean,
+            "summarization_compression": np.mean,
+        },
+        higher_is_better={
+            "summarization_coverage": True,
+            "summarization_density": True,
+            "summarization_compression": True,
+        },
+    )
+    f1_score_quasi = SampleLevelMetric(
+        metric_name="f1_score_quasi",
+        sample_level_fn=F1_score(normalize_gold=helm_normalizer, normalize_pred=helm_normalizer).compute,
+        category=MetricCategory.GENERATIVE,
+        use_case=MetricUseCase.ACCURACY,
+        corpus_level_fn=np.mean,
+        higher_is_better=True,
     )
     f1_score = SampleLevelMetric(
         metric_name="f1",
