@@ -21,11 +21,9 @@
 # SOFTWARE.
 
 import logging
-import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 from typing import Callable, List, Optional, Union
 
 import tokenizers
@@ -114,10 +112,9 @@ class LiteLLMModelConfig(ModelConfig):
     base_url: str | None = None
     api_key: str | None = None
     concurrent_requests: int = 10
+    verbose: Optional[bool] = False
     custom_huggingface_tokenizer: Optional[str] = None
-    api_base: Optional[str] = None
     use_cache: Optional[bool] = True
-    generation_parameters: Optional[GenerationParameters] = None
 
     concurrent_calls: Optional[int] = 20  # 100 leads to hitting Anthropic rate limits
     api_max_retry: Optional[int] = 8
@@ -132,29 +129,6 @@ class LiteLLMModelConfig(ModelConfig):
         if not self.generation_parameters:
             self.generation_parameters = GenerationParameters()
 
-    @classmethod
-    def from_path(cls, path: str) -> "LiteLLMModelConfig":
-        import yaml
-
-        with open(path, "r") as f:
-            config = yaml.safe_load(f)["model"]
-        generation_parameters = GenerationParameters.from_dict(config)
-        return cls(
-            model=config["model_name"],
-            provider=config["provider"],
-            api_base=config["api_base"],
-            use_cache=config["use_cache"],
-            custom_huggingface_tokenizer=config["custom_huggingface_tokenizer"],
-            concurrent_calls=config["concurrent_calls"],
-            api_max_retry=config["api_max_retry"],
-            api_retry_sleep=config["api_retry_sleep"],
-            api_retry_multiplier=config["api_retry_multiplier"],
-            timeout=config["timeout"],
-            success_callback=config["success_callback"],
-            failure_callback=config["failure_callback"],
-            generation_parameters=generation_parameters,
-        )
-
 
 class LiteLLMClient(LightevalModel):
     _DEFAULT_MAX_LENGTH: int = 4096
@@ -166,9 +140,6 @@ class LiteLLMClient(LightevalModel):
         self.generation_parameters = config.generation_parameters
         self.sampling_params = self.generation_parameters.to_litellm_dict()
         self.use_cache = config.use_cache
-
-        # TODO: remove and just use base_url with environment variable
-        self.api_base = config.api_base
 
         if config.custom_huggingface_tokenizer:
             logger.info("Using custom hugging face tokenizer from repository %s", config.custom_huggingface_tokenizer)
@@ -190,11 +161,10 @@ class LiteLLMClient(LightevalModel):
         self.CONCURENT_CALLS = config.concurrent_calls
         self.timeout = config.timeout
 
-        self.model = config.model
         self._tokenizer = encode
         self.pairwise_tokenization = False
         litellm.drop_params = True
-        litellm.verbose = True
+        litellm.verbose = config.verbose
         self.prompt_manager = PromptManager(
             use_chat_template=True, tokenizer=self.tokenizer, system_prompt=config.system_prompt
         )
@@ -275,9 +245,6 @@ class LiteLLMClient(LightevalModel):
 
         if kwargs.get("max_completion_tokens", None) is None:
             kwargs["max_completion_tokens"] = max_new_tokens
-
-        if self.api_base:
-            kwargs["api_base"] = self.api_base
 
         for attempt in range(self.API_MAX_RETRY):
             try:
