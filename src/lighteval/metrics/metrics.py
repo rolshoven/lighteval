@@ -55,7 +55,12 @@ from lighteval.metrics.metrics_sample import (
     Recall,
     StringDistance,
 )
-from lighteval.metrics.normalizations import bigbench_normalizer, remove_braces, remove_braces_and_strip
+from lighteval.metrics.normalizations import (
+    bigbench_normalizer,
+    helm_normalizer,
+    remove_braces,
+    remove_braces_and_strip,
+)
 from lighteval.metrics.sample_preparator import (
     GenerativePreparator,
     LoglikelihoodPreparator,
@@ -230,8 +235,7 @@ class Metrics(Enum):
         sample_level_fn=Extractiveness(
             normalize_input=remove_braces, normalize_pred=remove_braces_and_strip, input_column="text", language="de"
         ).compute,
-        category=MetricCategory.GENERATIVE,
-        use_case=MetricUseCase.SUMMARIZATION,
+        category=SamplingMethod.GENERATIVE,
         corpus_level_fn={
             "summarization_coverage": np.mean,
             "summarization_density": np.mean,
@@ -248,8 +252,7 @@ class Metrics(Enum):
         sample_level_fn=Extractiveness(
             normalize_input=remove_braces, normalize_pred=remove_braces_and_strip, input_column="text", language="fr"
         ).compute,
-        category=MetricCategory.GENERATIVE,
-        use_case=MetricUseCase.SUMMARIZATION,
+        category=SamplingMethod.GENERATIVE,
         corpus_level_fn={
             "summarization_coverage": np.mean,
             "summarization_density": np.mean,
@@ -266,8 +269,7 @@ class Metrics(Enum):
         sample_level_fn=Extractiveness(
             normalize_input=remove_braces, normalize_pred=remove_braces_and_strip, input_column="text", language="it"
         ).compute,
-        category=MetricCategory.GENERATIVE,
-        use_case=MetricUseCase.SUMMARIZATION,
+        category=SamplingMethod.GENERATIVE,
         corpus_level_fn={
             "summarization_coverage": np.mean,
             "summarization_density": np.mean,
@@ -282,8 +284,7 @@ class Metrics(Enum):
     f1_score_quasi = SampleLevelMetric(
         metric_name="f1_score_quasi",
         sample_level_fn=F1_score(normalize_gold=helm_normalizer, normalize_pred=helm_normalizer).compute,
-        category=MetricCategory.GENERATIVE,
-        use_case=MetricUseCase.ACCURACY,
+        category=SamplingMethod.GENERATIVE,
         corpus_level_fn=np.mean,
         higher_is_better=True,
     )
