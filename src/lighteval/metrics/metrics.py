@@ -234,7 +234,7 @@ class Metrics(Enum):
         metric_name=["summarization_coverage", "summarization_density", "summarization_compression"],
         sample_level_fn=Extractiveness(
             normalize_input=remove_braces, normalize_pred=remove_braces_and_strip, input_column="text", language="de"
-        ).compute,
+        ),
         category=SamplingMethod.GENERATIVE,
         corpus_level_fn={
             "summarization_coverage": np.mean,
@@ -251,7 +251,7 @@ class Metrics(Enum):
         metric_name=["summarization_coverage", "summarization_density", "summarization_compression"],
         sample_level_fn=Extractiveness(
             normalize_input=remove_braces, normalize_pred=remove_braces_and_strip, input_column="text", language="fr"
-        ).compute,
+        ),
         category=SamplingMethod.GENERATIVE,
         corpus_level_fn={
             "summarization_coverage": np.mean,
@@ -268,7 +268,7 @@ class Metrics(Enum):
         metric_name=["summarization_coverage", "summarization_density", "summarization_compression"],
         sample_level_fn=Extractiveness(
             normalize_input=remove_braces, normalize_pred=remove_braces_and_strip, input_column="text", language="it"
-        ).compute,
+        ),
         category=SamplingMethod.GENERATIVE,
         corpus_level_fn={
             "summarization_coverage": np.mean,
