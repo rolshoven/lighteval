@@ -40,7 +40,6 @@ from textwrap import dedent
 from typing import Callable, Literal, Optional
 
 import nltk
-import numpy as np
 import requests
 import torch
 from comet import download_model, load_from_checkpoint
@@ -54,16 +53,9 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from lighteval.metrics.imports.bert_scorer import BERTScorer
 from lighteval.metrics.metrics import Metrics
-from lighteval.metrics.metrics_corpus import CorpusLevelTranslationMetric
-from lighteval.metrics.metrics_sample import ROUGE, BertScore, Extractiveness, JudgeLLM, SampleLevelComputation
+from lighteval.metrics.metrics_sample import BertScore, JudgeLLM, SampleLevelComputation
 from lighteval.metrics.normalizations import remove_braces, remove_braces_and_strip
-from lighteval.metrics.sample_preparator import GenerativePreparator
-from lighteval.metrics.utils.metric_utils import (
-    CorpusLevelMetric,
-    SampleLevelMetric,
-    SampleLevelMetricGrouping,
-    SamplingMethod,
-)
+from lighteval.metrics.utils.metric_utils import SampleLevelMetric, SampleLevelMetricGrouping, SamplingMethod
 from lighteval.models.model_output import ModelResponse
 from lighteval.tasks.extended.mix_eval.main import process_judge_response_freeform_gpt
 from lighteval.tasks.lighteval_task import LightevalTaskConfig
@@ -471,13 +463,15 @@ class BertScoreMultilingual(BertScore):
         self.num_layers = num_layers
         self.device = device
 
-    def compute(self, responses: list[ModelResponse], docs: list[Doc], **kwargs) -> dict[str, float]:
+    def compute(self, model_response: ModelResponse, doc: Doc, **kwargs) -> dict[str, float]:
         # Make sure we load the correct bert_scorer before the parent class does
         if self.bert_scorer is None:
             self._init_bert_scorer()
 
+        result = super().compute(model_response=model_response, doc=doc, **kwargs)
+
         # Multiply output by 100 for consistency
-        return {k: v * 100 for k, v in super().compute(responses, docs, **kwargs).items()}
+        return {k: v * 100 for k, v in result.items()}
 
     def _init_bert_scorer(self):
         language = self.language
@@ -688,7 +682,7 @@ class COMET(SampleLevelComputation):
 
         logger.info(f"Scoring {len(docs)} samples with {self.metric_name}...")
         golds = [doc.get_golds()[0] for doc in docs]
-        predictions = [response.final_text for response in responses]
+        predictions = [response.final_text[0] for response in responses]
         sources = [doc.specific["source"] for doc in docs]
 
         data = [{"src": src, "mt": pred, "ref": gold} for src, pred, gold in zip(sources, predictions, golds)]
@@ -714,83 +708,70 @@ class METEOR(SampleLevelComputation):
         nltk.download("punkt_tab", quiet=True)
         nltk.download("wordnet", quiet=True)
 
-    def compute(self, responses: list[ModelResponse], docs: list[Doc], **kwargs) -> float:
-        golds = [doc.get_gold() for doc in docs]
-        predictions = [response.final_text for response in responses]
+    def compute(self, model_response: ModelResponse, doc: Doc, **kwargs) -> float:
+        """
+        Compute METEOR score for a single prediction against its reference(s).
+        """
+        golds = doc.get_golds()
+        prediction = model_response.final_text[0]
 
-        if isinstance(golds[0], list):  # multiple references
-            scores = [
-                meteor_score.meteor_score(
-                    [word_tokenize(ref) for ref in refs],
-                    word_tokenize(pred),
-                    alpha=self.alpha,
-                    beta=self.beta,
-                    gamma=self.gamma,
-                )
-                for refs, pred in zip(golds, predictions)
-            ]
+        if len(golds) > 1:  # multiple references
+            score = meteor_score.meteor_score(
+                [word_tokenize(gold) for gold in golds],
+                word_tokenize(prediction),
+                alpha=self.alpha,
+                beta=self.beta,
+                gamma=self.gamma,
+            )
         else:
-            scores = [
-                meteor_score.single_meteor_score(
-                    word_tokenize(ref),
-                    word_tokenize(pred),
-                    alpha=self.alpha,
-                    beta=self.beta,
-                    gamma=self.gamma,
-                )
-                for ref, pred in zip(golds, predictions)
-            ]
+            score = meteor_score.single_meteor_score(
+                word_tokenize(golds[0]),
+                word_tokenize(prediction),
+                alpha=self.alpha,
+                beta=self.beta,
+                gamma=self.gamma,
+            )
 
-        return statistics.mean(scores) * 100
+        return score * 100
 
 
 class BLEU(SampleLevelComputation):
-    def compute(self, responses: list[ModelResponse], docs: list[Doc], **kwargs) -> float:
+    def compute(self, model_response: ModelResponse, doc: Doc, **kwargs) -> float:
         """
-        Compute BLEU score for a list of predictions against their references.
-
-        Args:
-            golds: List of reference strings
-            predictions: List of prediction strings
-
-        Returns:
-            Mean BLEU score scaled to 0-100
+        Compute BLEU score for a single prediction against its reference.
         """
-        golds = [doc.get_gold() for doc in docs]
-        predictions = [response.final_text for response in responses]
-        scores = []
-        for ref, pred in zip(golds, predictions):
-            scores.append(sentence_bleu(pred, [ref]).score)
+        # Get the first (and typically only) gold and prediction
+        gold = doc.get_golds()[0]
+        prediction = model_response.final_text[0]  # Get first prediction
 
-        return statistics.mean(scores) * 100
+        score = sentence_bleu(prediction, [gold]).score
+        return score * 100
 
 
 class CHRF(SampleLevelComputation):
-    def compute(self, responses: list[ModelResponse], docs: list[Doc], **kwargs) -> float:
+    def compute(self, model_response: ModelResponse, doc: Doc, **kwargs) -> float:
         """
-        Compute chrF score for a list of predictions against their references.
+        Compute chrF score for a single prediction against its reference.
         """
-        golds = [doc.get_gold() for doc in docs]
-        predictions = [response.final_text for response in responses]
-        scores = []
-        for ref, pred in zip(golds, predictions):
-            scores.append(sentence_chrf(pred, [ref]).score)
+        # Get the first (and typically only) gold and prediction
+        gold = doc.get_golds()[0]
+        prediction = model_response.final_text[0]  # Get first prediction
 
-        return statistics.mean(scores) * 100
+        score = sentence_chrf(prediction, [gold]).score
+        return score * 100
 
 
 class TER(SampleLevelComputation):
-    def compute(self, responses: list[ModelResponse], docs: list[Doc], **kwargs) -> float:
+    def compute(self, model_response: ModelResponse, doc: Doc, **kwargs) -> float:
         """
-        Compute TER score for a list of predictions against their references.
+        Compute TER score for a single prediction against its reference.
         """
-        golds = [doc.get_gold() for doc in docs]
-        predictions = [response.final_text for response in responses]
-        scores = []
-        for ref, pred in zip(golds, predictions):
-            scores.append(sentence_ter(pred, [ref]).score)
+        # Get the first (and typically only) gold and prediction
+        gold = doc.get_golds()[0]
+        prediction = model_response.final_text[0]  # Get first prediction
 
-        return statistics.mean(scores) * 100
+        score = sentence_ter(prediction, [gold]).score
+        return score * 100
 
 
 class JudgeSwissLegalTranslation(JudgeLLM):
@@ -939,7 +920,7 @@ def get_bert_score(
             "BERTScore-R": statistics.mean,
             "BERTScore-F": statistics.mean,
         },
-        batched_compute=True,
+        batched_compute=False,
     )
 
 
@@ -1007,7 +988,7 @@ def get_gemba_judge(method: str = "GEMBA-MQM_norm", model: str = "gpt-4o"):
         metric_name=[name],
         higher_is_better={name: True},
         category=SamplingMethod.GENERATIVE,
-        sample_level_fn=GEMBA(method=method, model=model).compute,
+        sample_level_fn=GEMBA(method=method, model=model),
         corpus_level_fn={name: statistics.mean},
         batched_compute=True,
     )
@@ -1027,7 +1008,7 @@ def get_bleurt(
         metric_name=[name],
         higher_is_better={name: True},
         category=SamplingMethod.GENERATIVE,
-        sample_level_fn=BLEURT(model_size=model_size, seq_len=seq_len, batch_size=batch_size, device=device).compute,
+        sample_level_fn=BLEURT(model_size=model_size, seq_len=seq_len, batch_size=batch_size, device=device),
         corpus_level_fn={name: statistics.mean},
         batched_compute=True,
     )
@@ -1052,7 +1033,7 @@ def get_comet(
             batch_size=batch_size,
             gpus=gpus,
             accelerator=device,
-        ).compute,
+        ),
         corpus_level_fn={name: statistics.mean},
         batched_compute=True,
     )
@@ -1067,7 +1048,6 @@ def get_meteor(
         category=metric_category,
         sample_level_fn=METEOR(),
         corpus_level_fn=statistics.mean,
-        batched_compute=True,
     )
 
 
@@ -1076,9 +1056,8 @@ def get_bleu_sentence():
         metric_name="bleu_sentence",
         higher_is_better=True,
         category=SamplingMethod.GENERATIVE,
-        sample_level_fn=BLEU().compute,
+        sample_level_fn=BLEU(),
         corpus_level_fn=statistics.mean,
-        batched_compute=True,
     )
 
 
@@ -1087,9 +1066,8 @@ def get_chrf_sentence():
         metric_name="chrf_sentence",
         higher_is_better=True,
         category=SamplingMethod.GENERATIVE,
-        sample_level_fn=CHRF().compute,
+        sample_level_fn=CHRF(),
         corpus_level_fn=statistics.mean,
-        batched_compute=True,
     )
 
 
@@ -1098,10 +1076,20 @@ def get_ter_sentence():
         metric_name="ter_sentence",
         higher_is_better=False,
         category=SamplingMethod.GENERATIVE,
-        sample_level_fn=TER().compute,
+        sample_level_fn=TER(),
         corpus_level_fn=statistics.mean,
-        batched_compute=True,
     )
+
+
+def get_extractiveness(language: Literal["de", "fr", "it"]) -> SampleLevelMetricGrouping:
+    if language == "de":
+        return Metrics.extractiveness_de
+    if language == "fr":
+        return Metrics.extractiveness_fr
+    if language == "it":
+        return Metrics.extractiveness_it
+
+    raise ValueError(f"Unsupported language for extractiveness metric: {language}")
 
 
 # ----- DATASET CONFIGS AND HELPER FUNCTIONS ----- #
@@ -1366,7 +1354,7 @@ JUDGE_METRICS = [
     for few_shot_style in ["diverse", "single"]
 ]
 
-metrics_to_evaluate = ["debug"]
+metrics_to_evaluate = ["judge"]
 
 METRICS_TO_USE = []
 if metrics_to_evaluate == ["debug"]:
@@ -1382,7 +1370,7 @@ elif "judge" in metrics_to_evaluate:
 else:
     METRICS_TO_USE = LEXICAL_METRICS + GPU_METRICS + API_METRICS
 
-METRICS_TO_USE = ["bleu", "rouge1", "rouge2", "rougeL", "meteor", "bert_score"]
+# METRICS_TO_USE = ["bleu", "rouge1", "rouge2", "rougeL", "meteor", "bert_score"]
 
 logger.info(f"Available metrics: {METRICS_TO_USE}")
 
@@ -1568,81 +1556,21 @@ class HeadnoteGenerationTask(LightevalTaskConfig):
 
     def _get_metrics(self, headnote_language: Literal["de", "fr", "it"]) -> list[Metrics]:
         return [
-            get_swiss_landmark_decision_summarization_judge(
-                language=headnote_language,
-            ),
             get_bert_score(
                 language=headnote_language,
                 model_type="xlm-roberta-large",
                 device=device,
                 metric_category=SamplingMethod.GENERATIVE,
             ),
-            self._get_bleu(),
-            self._get_rouge1(),
-            self._get_rouge2(),
-            self._get_rougeL(),
-            self._get_extractiveness(),
+            Metrics.bleu,
+            Metrics.rouge1,
+            Metrics.rouge2,
+            Metrics.rougeL,
+            get_swiss_landmark_decision_summarization_judge(
+                language=headnote_language,
+            ),
+            get_extractiveness(language=headnote_language),
         ]
-
-    def _get_bleu(self) -> Metrics:
-        # Adapted from Metrics.bleu
-        return CorpusLevelMetric(
-            metric_name="bleu",
-            sample_level_fn=GenerativePreparator().prepare,
-            category=SamplingMethod.GENERATIVE,
-            corpus_level_fn=CorpusLevelTranslationMetric("bleu").compute_corpus,
-            higher_is_better=True,
-        )
-
-    def _get_rouge1(self) -> Metrics:
-        # Adapted from Metrics.rouge1
-        return SampleLevelMetric(
-            metric_name="rouge1",
-            sample_level_fn=ROUGE("rouge1").compute,
-            category=SamplingMethod.GENERATIVE,
-            corpus_level_fn=np.mean,
-            higher_is_better=True,
-        )
-
-    def _get_rouge2(self) -> Metrics:
-        # Adapted from Metrics.rouge2
-        return SampleLevelMetric(
-            metric_name="rouge2",
-            sample_level_fn=ROUGE("rouge2").compute,
-            category=SamplingMethod.GENERATIVE,
-            corpus_level_fn=np.mean,
-            higher_is_better=True,
-        )
-
-    def _get_rougeL(self) -> Metrics:
-        # Adapted from Metrics.rougeL
-        return SampleLevelMetric(
-            metric_name="rougeL",
-            sample_level_fn=ROUGE("rougeL").compute,
-            category=SamplingMethod.GENERATIVE,
-            corpus_level_fn=np.mean,
-            higher_is_better=True,
-        )
-
-    def _get_extractiveness(self) -> Metrics:
-        # Adapted from Metrics.extractiveness
-        return SampleLevelMetricGrouping(
-            metric_name=["summarization_coverage", "summarization_density", "summarization_compression"],
-            sample_level_fn=Extractiveness(
-                normalize_input=remove_braces, normalize_pred=remove_braces_and_strip, input_column="text"
-            ).compute,
-            category=SamplingMethod.GENERATIVE,
-            corpus_level_fn={
-                "summarization_coverage": np.mean,
-                "summarization_density": np.mean,
-                "summarization_compression": np.mean,
-            },
-            higher_is_better={
-                "summarization_coverage": True,
-                "summarization_density": True,
-                "summarization_compression": True,
-            },
-        )
 
 
 # ----- DATASETS AND TASKS TO EXPORT ----- #
