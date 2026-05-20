@@ -378,7 +378,7 @@ class BLEU(SampleLevelComputation):
         prediction = model_response.final_text[0]  # Get first prediction
 
         score = sentence_bleu(prediction, [gold]).score
-        return score * 100
+        return score
 
 
 class CHRF(SampleLevelComputation):
@@ -391,7 +391,7 @@ class CHRF(SampleLevelComputation):
         prediction = model_response.final_text[0]  # Get first prediction
 
         score = sentence_chrf(prediction, [gold]).score
-        return score * 100
+        return score
 
 
 class TER(SampleLevelComputation):
@@ -404,7 +404,7 @@ class TER(SampleLevelComputation):
         prediction = model_response.final_text[0]  # Get first prediction
 
         score = sentence_ter(prediction, [gold]).score
-        return score * 100
+        return score
 
 
 class JudgeSwissLegalTranslation(JudgeLLM):
