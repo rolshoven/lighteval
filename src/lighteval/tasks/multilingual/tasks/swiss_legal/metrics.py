@@ -474,6 +474,10 @@ class JudgeSwissLandmarkDecisionSummarization(JudgeLLM):
             one_shot_example = SLDS_JUDGE_ONE_SHOT_EXAMPLE_FR.strip()
         elif self.language == "it":
             one_shot_example = SLDS_JUDGE_ONE_SHOT_EXAMPLE_IT.strip()
+        else:
+            raise ValueError(
+                f"Unsupported language for Swiss Landmark Decision Summarization judge: {self.language}. Only 'de', 'fr', and 'it' are supported."
+            )
 
         # Fill template with original and generated headnote
         user_prompt = user_prompt.format(
