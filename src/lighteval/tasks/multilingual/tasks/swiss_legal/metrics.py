@@ -4,7 +4,7 @@ import logging
 import os
 import re
 import statistics
-from typing import Literal, Optional
+from typing import Callable, Literal, Optional
 
 import nltk
 import requests
@@ -83,7 +83,13 @@ def process_judge_response_freeform_gpt(response: str) -> float:
 
 class BertScoreMultilingual(BertScore):
     def __init__(
-        self, normalize_gold=None, normalize_pred=None, language=str, model_type=str, num_layers=int, device=str
+        self,
+        normalize_gold: Callable | None = None,
+        normalize_pred: Callable | None = None,
+        language: str = "en",
+        model_type: str = "xlm-roberta-large",
+        num_layers: int = 24,
+        device: str = "cpu",
     ):
         super().__init__(normalize_gold, normalize_pred)
         self.language = language
