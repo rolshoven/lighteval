@@ -90,12 +90,24 @@ class BertScoreMultilingual(BertScore):
         model_type: str = "xlm-roberta-large",
         num_layers: int = 24,
         device: str = "cpu",
+        rescale_with_baseline: bool = False,
     ):
         super().__init__(normalize_gold, normalize_pred)
         self.language = language
         self.model_type = model_type
         self.num_layers = num_layers
         self.device = device
+        self.rescale_with_baseline = rescale_with_baseline
+
+        if rescale_with_baseline:
+            logger.warning(
+                "rescale_with_baseline=True can produce large negative scores when the baseline is close to 1.0 "
+                "(e.g. German xlm-roberta-large at layer 24 has a baseline of ~0.98). "
+                "The rescaling formula (score - baseline) / (1 - baseline) amplifies deviations by up to 50x, "
+                "and the subsequent x100 scaling compounds this further. "
+                "Empty or weak predictions may result in values like -5000 instead of a bounded score. "
+                "Consider using rescale_with_baseline=False (the default) unless you specifically need relative-to-baseline scores."
+            )
 
     def compute(self, doc: Doc, model_response: ModelResponse, **kwargs) -> dict[str, float]:
         # Make sure we load the correct bert_scorer before the parent class does
@@ -104,8 +116,10 @@ class BertScoreMultilingual(BertScore):
 
         result = super().compute(model_response=model_response, doc=doc, **kwargs)
 
-        # Multiply output by 100 for consistency
-        return {k: v * 100 for k, v in result.items()}
+        # Multiply output by 100 for consistency with other metrics reported on a 0-100 scale.
+        # Note: only valid when rescale_with_baseline=False, where raw scores live in [0, 1].
+        # With rescaling enabled the scores can be unboundedly negative, making x100 misleading.
+        return {k: v * 100 for k, v in result.items()} if not self.rescale_with_baseline else result
 
     def _init_bert_scorer(self):
         language = self.language
@@ -123,24 +137,30 @@ class BertScoreMultilingual(BertScore):
             model_type=self.model_type,
             lang=language,  # Needs to be set if rescale_with_baseline is True
             num_layers=self.num_layers,  # Needs to be set if rescale_with_baseline is True
-            rescale_with_baseline=True,
+            rescale_with_baseline=self.rescale_with_baseline,
             baseline_path=None,
             device=self.device,
         )
 
-        # Create directory structure if it doesn't exist
-        os.makedirs(os.path.dirname(self.bert_scorer.baseline_path), exist_ok=True)
+        if self.rescale_with_baseline:
+            baseline_path = self.bert_scorer.baseline_path
+            if baseline_path is None:
+                raise RuntimeError("BERTScore baseline path must be set when rescale_with_baseline=True")
 
-        # Download the baseline file if it doesn't exist
-        if not os.path.exists(self.bert_scorer.baseline_path):
-            raw_url = f"https://raw.githubusercontent.com/Tiiiger/bert_score/master/bert_score/rescale_baseline/{language}/{self.model_type}.tsv"
-            logger.info(f"Downloading BERTScore baseline file from {raw_url}")
-            response = requests.get(raw_url)
-            if response.status_code == 200:
-                with open(self.bert_scorer.baseline_path, "wb") as f:
-                    f.write(response.content)
-            else:
-                raise RuntimeError(f"Failed to download baseline file from {raw_url}")
+            os.makedirs(os.path.dirname(baseline_path), exist_ok=True)
+
+            if not os.path.exists(baseline_path):
+                raw_url = (
+                    "https://raw.githubusercontent.com/Tiiiger/bert_score/master/"
+                    f"bert_score/rescale_baseline/{language}/{self.model_type}.tsv"
+                )
+                logger.info("Downloading BERTScore baseline file from %s", raw_url)
+                response = requests.get(raw_url)
+                if response.status_code == 200:
+                    with open(baseline_path, "wb") as f:
+                        f.write(response.content)
+                else:
+                    raise RuntimeError(f"Failed to download baseline file from {raw_url}")
 
 
 class GEMBA(SampleLevelComputation):
@@ -539,6 +559,7 @@ def get_bert_score(
     model_type: str = "xlm-roberta-large",
     device: str = "cpu",
     metric_category: SamplingMethod = SamplingMethod.GENERATIVE,
+    rescale_with_baseline: bool = False,
 ):
     return SampleLevelMetricGrouping(
         metric_name=["BERTScore-P", "BERTScore-R", "BERTScore-F"],
@@ -555,6 +576,7 @@ def get_bert_score(
             model_type=model_type,
             num_layers=num_layers,
             device=device,
+            rescale_with_baseline=rescale_with_baseline,
         ),
         corpus_level_fn={
             "BERTScore-P": statistics.mean,
