@@ -32,6 +32,7 @@ from inspect_ai.dataset import Sample
 from multiprocess import Pool
 from pytablewriter import MarkdownTableWriter
 
+from lighteval.harbor.agent_spec import HarborAgentSpec
 from lighteval.metrics.metrics import Metrics
 from lighteval.metrics.metrics_sample import SamplingMetric
 from lighteval.metrics.utils.metric_utils import Metric
@@ -148,6 +149,7 @@ class LightevalTaskConfig:
     num_fewshots: int = 0
 
     version: int = 0
+    harbor_agent: HarborAgentSpec | None = None
 
     def __post_init__(self):
         # If we got a Metrics enums instead of a Metric, we convert

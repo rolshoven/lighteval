@@ -64,6 +64,8 @@ class EnhancedJSONEncoder(json.JSONEncoder):
     """
 
     def default(self, o):  # noqa : C901
+        if hasattr(o, "model_dump"):
+            return o.model_dump()
         if is_dataclass(o):
             try:
                 return asdict(o)  # type: ignore

@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "swiss-caselaw": {
+      "url": "https://mcp.opencaselaw.ch"
+    }
+  }
+}

@@ -2,8 +2,10 @@ import ast
 import random
 import string
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Literal, Optional
 
+from lighteval.harbor.agent_spec import HarborAgentSpec
 from lighteval.metrics.metrics import Metrics
 from lighteval.tasks.lighteval_task import LightevalTaskConfig
 from lighteval.tasks.multilingual.tasks.swiss_legal.metrics import (
@@ -339,6 +341,14 @@ LEXAM_MCQ_NUM_CHOICES = [4, 8, 16, 32]
 # the model emits its ###X### final answer.
 LEXAM_GENERATION_SIZE = 32768
 LEXAM_STOP_SEQUENCES = ["</s>"]
+LEXAM_HARBOR_SKILLS_DIR = str(Path(__file__).resolve().parent / "harbor_skills")
+LEXAM_HARBOR_AGENT = HarborAgentSpec(
+    runner_module="lighteval.tasks.multilingual.tasks.swiss_legal.lexam_subprocess_runner",
+    harbor_agent_import="lighteval.tasks.multilingual.tasks.swiss_legal.lexam_harbor_agent:LexamHarborAgent",
+    skills_dir=LEXAM_HARBOR_SKILLS_DIR,
+    default_harbor_agent="lexam",
+    utility_quality_metrics=("acc", "trad_score", "lexam_oq_judge_gpt-4o"),
+)
 
 
 def lexam_oq_prompt_fn(line: dict, task_name: str = None) -> Doc:
@@ -419,6 +429,7 @@ class LEXamOpenQuestionTask(LightevalTaskConfig):
             generation_size=LEXAM_GENERATION_SIZE,
             stop_sequence=LEXAM_STOP_SEQUENCES,
             metrics=[get_lexam_oq_judge()],
+            harbor_agent=LEXAM_HARBOR_AGENT,
         )
 
 
@@ -440,6 +451,7 @@ class LEXamMCQTask(LightevalTaskConfig):
             generation_size=LEXAM_GENERATION_SIZE,
             stop_sequence=LEXAM_STOP_SEQUENCES,
             metrics=[get_lexam_mcq_metric(with_idk=with_idk)],
+            harbor_agent=LEXAM_HARBOR_AGENT,
         )
 
 

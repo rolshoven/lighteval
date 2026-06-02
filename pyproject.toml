@@ -94,6 +94,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+harbor = ["harbor>=0.8.0; python_version >= '3.12'"]
 litellm = ["litellm[caching]>=1.66.0", "diskcache"]
 tgi = ["text-generation>=0.7.0"]
 optimum = ["optimum==1.12.0"]

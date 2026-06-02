@@ -35,6 +35,7 @@ from lighteval.models.endpoints.inference_providers_model import (
     InferenceProvidersClient,
     InferenceProvidersModelConfig,
 )
+from lighteval.models.harbor.harbor_model import HarborModel, HarborModelConfig
 from lighteval.models.endpoints.litellm_model import LiteLLMClient, LiteLLMModelConfig
 from lighteval.models.endpoints.tgi_model import ModelClient, TGIModelConfig
 from lighteval.models.sglang.sglang_model import SGLangModel, SGLangModelConfig
@@ -80,6 +81,9 @@ def load_model(  # noqa: C901
 
     if isinstance(config, CustomModelConfig):
         return load_custom_model(config=config)
+
+    if isinstance(config, HarborModelConfig):
+        return load_harbor_model(config=config)
 
     if isinstance(config, SGLangModelConfig):
         return load_sglang_model(config)
@@ -165,6 +169,10 @@ def load_dummy_model(config: DummyModelConfig):
 
 def load_inference_providers_model(config: InferenceProvidersModelConfig):
     return InferenceProvidersClient(config=config)
+
+
+def load_harbor_model(config: HarborModelConfig):
+    return HarborModel(config=config)
 
 
 def load_sglang_model(config: SGLangModelConfig):

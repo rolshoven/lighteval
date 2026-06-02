@@ -29,6 +29,7 @@ import lighteval.main_accelerate
 import lighteval.main_baseline
 import lighteval.main_custom
 import lighteval.main_endpoint
+import lighteval.main_harbor
 import lighteval.main_inspect
 import lighteval.main_nanotron
 import lighteval.main_sglang
@@ -83,6 +84,12 @@ app.add_typer(
     name="tasks",
     rich_help_panel="Utils",
     help="List or inspect tasks.",
+)
+app.add_typer(
+    lighteval.main_harbor.app,
+    name="harbor",
+    rich_help_panel="Evaluation Backends",
+    help="Evaluate via Harbor execution while keeping lighteval scoring.",
 )
 
 

@@ -116,6 +116,9 @@ Lighteval offers the following entry points for model evaluation:
 - `lighteval vllm`: Evaluate models on one or more GPUs using [🚀
   VLLM](https://github.com/vllm-project/vllm)
 - `lighteval sglang`: Evaluate models using [SGLang](https://github.com/sgl-project/sglang) as backend
+- `lighteval harbor run`: Evaluate with Harbor-backed subprocess execution while keeping native lighteval task metrics
+- `lighteval harbor job`: Run Harbor sandbox jobs, then evaluate outputs with lighteval metrics
+- `lighteval harbor score`: Score previously generated Harbor outputs with lighteval metrics
 - `lighteval endpoint`: Evaluate models using various endpoints as backend
   - `lighteval endpoint inference-endpoint`: Evaluate models using Hugging Face's [Inference Endpoints API](https://huggingface.co/inference-endpoints/dedicated)
   - `lighteval endpoint tgi`: Evaluate models using [🔗 Text Generation Inference](https://huggingface.co/docs/text-generation-inference/en/index) running locally
@@ -124,6 +127,22 @@ Lighteval offers the following entry points for model evaluation:
 
 Did not find what you need ? You can always make your custom model API by following [this guide](https://huggingface.co/docs/lighteval/main/en/evaluating-a-custom-model)
 - `lighteval custom`: Evaluate custom models (can be anything)
+
+### Harbor-backed evaluation
+
+Install the optional extra: `pip install lighteval[harbor]` (requires Python 3.12+).
+
+- `lighteval harbor run` — subprocess bridge; uses each task's `harbor_agent.runner_module` (or CLI overrides).
+- `lighteval harbor job` — Harbor sandbox per sample, then lighteval metrics.
+- `lighteval harbor score` — score pre-generated answers only.
+
+Example (LEXam subprocess baseline):
+
+```shell
+lighteval harbor run "model_name=my-agent,reference_model=openai/gpt-4o-mini" "lexam_mcq_4:en|0" --load-tasks-multilingual --max-samples 10
+```
+
+See [examples/harbor_lexam/README.md](examples/harbor_lexam/README.md) for job mode, built-in Harbor agents, skills, and scaffolding.
 
 Here's a **quick command** to evaluate using a remote inference service:
 
